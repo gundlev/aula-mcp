@@ -56,6 +56,12 @@ export class KeychainTokenStore implements TokenStore {
     this.account = opts.account ?? 'tokens';
   }
 
+  /** Stable identity of the credentials this store addresses, so separately
+   *  constructed stores for the same keychain item share one refresher. */
+  get identity(): string {
+    return `keychain:${this.service}/${this.account}`;
+  }
+
   /** True on macOS. The `security` CLI is otherwise absent. */
   static isSupported(): boolean {
     return process.platform === 'darwin';

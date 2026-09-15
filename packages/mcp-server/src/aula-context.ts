@@ -13,13 +13,14 @@ import { join } from 'node:path';
 import {
   AulaHttpClient,
   EncryptedFileTokenStore,
+  getTokenRefresher,
   isTokenExpired,
   KeychainTokenStore,
   type Logger,
   type StoredTokenRecord,
   silentLogger,
+  type TokenRefresher,
   type TokenStore,
-  withFreshTokens,
 } from '@aula-mcp/aula-auth';
 import {
   AulaClient,
@@ -35,17 +36,44 @@ import {
 export interface AulaContextOptions {
   store?: TokenStore;
   logger?: Logger;
+  /** HTTP client for Aula and the token endpoint (tests inject a fake). */
+  http?: AulaHttpClient;
+  /** Seconds before expiry at which tokens count as expired. Default 60. */
+  refreshBufferSeconds?: number;
+  /** How often the shared refresher re-reads the store while its cached
+   *  tokens still look valid. Default 30 s; `0` re-reads on every call. */
+  recheckIntervalMs?: number;
+  /** Override the process-wide refresher (tests). */
+  refresher?: TokenRefresher;
 }
+
+/** What `/readyz` reports. Coarse on purpose: no usernames, no expiry times. */
+export interface AuthReadiness {
+  ready: boolean;
+  reason?: 'no_tokens' | 'refresh_failing' | 'store_error';
+}
+
+/** A refresh failure this recent, with expired tokens, means "not ready". */
+const REFRESH_FAILURE_GRACE_MS = 10 * 60 * 1000;
 
 export class AulaContext {
   private readonly store: TokenStore;
   private readonly logger: Logger;
   private readonly http: AulaHttpClient;
+  private readonly refreshBufferSeconds: number;
+  /**
+   * Shared with every other context on the same token store (see
+   * `getTokenRefresher`): one in-flight refresh per store per process, so N
+   * MCP sessions noticing expiry at once produce one refresh request, not N.
+   */
+  private readonly refresher: TokenRefresher;
   // Fields below are declared as `T | undefined` (not just `T?`) so we can
   // explicitly assign `undefined` to invalidate the cache (the strict
   // `exactOptionalPropertyTypes` flag forbids `field = undefined` on `T?`).
+  private client: AulaClient | undefined;
+  /** In-flight `getClient()` so concurrent callers in this context share it. */
   private clientPromise: Promise<AulaClient> | undefined;
-  private widgetManagerPromise: Promise<WidgetTokenManager> | undefined;
+  private widgetManager: WidgetTokenManager | undefined;
   private cachedRecord: StoredTokenRecord | undefined;
   /** Guardian user-id from getProfileContext. Used as the
    *  sessionId/sessionUUID/sessionuuid parameter by the third-party
@@ -55,11 +83,24 @@ export class AulaContext {
   private cachedGuardianUserId: string | undefined;
   private tokenFileWatcher: FSWatcher | undefined;
   private tokenFileChangeDebounce: NodeJS.Timeout | undefined;
+  private disposed = false;
 
   constructor(options: AulaContextOptions = {}) {
     this.store = options.store ?? defaultStore();
     this.logger = options.logger ?? silentLogger;
-    this.http = new AulaHttpClient({ logger: this.logger });
+    this.http = options.http ?? new AulaHttpClient({ logger: this.logger });
+    this.refreshBufferSeconds = options.refreshBufferSeconds ?? 60;
+    this.refresher =
+      options.refresher ??
+      getTokenRefresher({
+        store: this.store,
+        http: this.http,
+        logger: this.logger,
+        refreshBufferSeconds: this.refreshBufferSeconds,
+        ...(options.recheckIntervalMs !== undefined
+          ? { recheckIntervalMs: options.recheckIntervalMs }
+          : {}),
+      });
     this.watchTokenFile();
   }
 
@@ -111,51 +152,98 @@ export class AulaContext {
     }
   }
 
-  /** Close the token-file watcher. Tests should call this; long-lived servers
-   *  can leave it until process exit. */
+  /**
+   * Release everything this context holds: the token-file watcher and the
+   * cached client. Called by the HTTP server when the owning MCP session
+   * closes (audit finding 7 — watchers used to accumulate per session).
+   * The shared refresher is process-wide and is deliberately left alone.
+   */
   dispose(): void {
+    this.disposed = true;
     if (this.tokenFileChangeDebounce) {
       clearTimeout(this.tokenFileChangeDebounce);
       this.tokenFileChangeDebounce = undefined;
     }
     this.tokenFileWatcher?.close();
     this.tokenFileWatcher = undefined;
+    this.client = undefined;
+    this.clientPromise = undefined;
+    this.widgetManager = undefined;
+    this.cachedRecord = undefined;
   }
 
   /**
    * Get the AulaClient, refreshing tokens if expired.
    *
-   * Concurrency-safe (J5 fix): the in-flight `clientPromise` is shared across
-   * concurrent callers, so a refresh fires once and everyone waits on it.
+   * Every call goes through the shared refresher, which answers from its
+   * cache while the access token is valid (a synchronous check) and
+   * otherwise performs — or joins — the single in-flight refresh for this
+   * token store. Within one context concurrent callers additionally share
+   * `clientPromise`, so N parallel tool calls on an expired token produce
+   * one refresh request, not N (the race the audit reproduced).
    *
-   * Auto-recovery (Q8): if the cached tokens have expired since the client
-   * was built, we drop the cached promise and rebuild — which re-reads the
-   * token store from disk. This means a fresh `aula login` from the CLI
-   * recovers a server with bad tokens without restarting the server process.
+   * When the refresher hands back different tokens than the client was
+   * built with (a refresh here, or an out-of-band `aula login`), the client
+   * and its widget-token manager are rebuilt so nothing keeps using the old
+   * session.
    */
   async getClient(): Promise<AulaClient> {
-    if (this.cachedRecord && isTokenExpired(this.cachedRecord.tokens, 60)) {
-      this.logger.info('aula-context.token_expired_invalidating');
-      this.clientPromise = undefined;
-    }
-    if (!this.clientPromise) {
-      this.clientPromise = this.buildClient().catch((err: unknown) => {
-        // On failure, clear the cached promise so the next call retries
-        // rather than re-throwing the same stale rejection forever.
-        this.clientPromise = undefined;
-        throw err;
+    if (this.disposed) throw new Error('AulaContext has been disposed');
+    if (this.clientPromise) return this.clientPromise;
+    const load = this.loadClient().finally(() => {
+      // Only the in-flight window is shared; the next call re-checks token
+      // validity through the refresher's cache.
+      if (this.clientPromise === load) this.clientPromise = undefined;
+    });
+    this.clientPromise = load;
+    return load;
+  }
+
+  /**
+   * Whether this server can currently act on Aula, for `/readyz`.
+   *
+   * Reads the store directly so a missing or unreadable token file is
+   * reported even before any tool call. With an expired access token the
+   * answer depends on a refresh working; that refresh is attempted through
+   * the shared refresher (so it is shared with tool calls, and keeps the
+   * refresh-token chain alive on an otherwise idle server) but at most once
+   * per grace window while it keeps failing.
+   */
+  async readiness(): Promise<AuthReadiness> {
+    let record: StoredTokenRecord | null;
+    try {
+      record = await this.store.load();
+    } catch (err) {
+      this.logger.warn('aula-context.readiness.store_error', {
+        error: err instanceof Error ? err.message : String(err),
       });
+      return { ready: false, reason: 'store_error' };
     }
-    return this.clientPromise;
+    if (!record) return { ready: false, reason: 'no_tokens' };
+    if (!isTokenExpired(record.tokens, this.refreshBufferSeconds)) return { ready: true };
+
+    const recent = this.refresher.recentError;
+    if (recent && Date.now() - recent.at < REFRESH_FAILURE_GRACE_MS) {
+      return { ready: false, reason: 'refresh_failing' };
+    }
+    try {
+      await this.refresher.getFresh();
+      return { ready: true };
+    } catch {
+      return { ready: false, reason: 'refresh_failing' };
+    }
   }
 
   /** Drop all cached state. Useful for tests; also called when an upstream
-   *  401/403 indicates the server's view of our tokens is wrong. */
+   *  401/403 indicates the server's view of our tokens is wrong. The shared
+   *  refresher is told to re-read the store on its next call as well. */
   invalidate(): void {
+    this.client = undefined;
     this.clientPromise = undefined;
-    this.widgetManagerPromise = undefined;
+    this.widgetManager = undefined;
     this.cachedRecord = undefined;
     this.cachedGuardianUserId = undefined;
+    this.refresher.invalidate();
   }
 
   /**
@@ -178,12 +266,15 @@ export class AulaContext {
     return this.cachedGuardianUserId;
   }
 
+  /**
+   * Widget-token manager bound to the current client. `loadClient()` drops
+   * it whenever the client is rebuilt, so widget tokens minted under a
+   * previous Aula session are never reused after a token rotation.
+   */
   async getWidgetManager(): Promise<WidgetTokenManager> {
-    if (!this.widgetManagerPromise) {
-      this.widgetManagerPromise = (async () =>
-        new WidgetTokenManager({ client: await this.getClient() }))();
-    }
-    return this.widgetManagerPromise;
+    const client = await this.getClient();
+    this.widgetManager ??= new WidgetTokenManager({ client });
+    return this.widgetManager;
   }
 
   async getEasyIq(): Promise<EasyIqClient> {
@@ -221,29 +312,46 @@ export class AulaContext {
     return this.cachedRecord;
   }
 
-  private async buildClient(): Promise<AulaClient> {
-    // Plain refresh_token grant. The scaarup/aula HA integration has
-    // proven empirically that Aula's OAuth server preserves the
-    // `aula-sensitive` scope through refresh_token grants — HA reads
-    // sensitive endpoints (messaging.getMessagesForThread) for months
-    // from a single MitID login using nothing but
+  private async loadClient(): Promise<AulaClient> {
+    // Plain refresh_token grant (performed inside the shared refresher). The
+    // scaarup/aula HA integration has proven empirically that Aula's OAuth
+    // server preserves the `aula-sensitive` scope through refresh_token
+    // grants — HA reads sensitive endpoints (messaging.getMessagesForThread)
+    // for months from a single MitID login using nothing but
     // `grant_type=refresh_token` against simplesaml/.../token.php.
     // Earlier suspicion that step-up assurance was bound to the
     // broker session at unilogin.dk was a misdiagnosis — the 403s we
     // were seeing were the v22→v23 apiVersion deprecation (fixed in
-    // 60c4246), not step-up loss. Silent SSO was "working" via side
-    // effect (each reauth rebuilt AulaContext via fs.watch
-    // invalidation, which re-probed apiVersion to v23). The `aula
-    // refresh-stepup` CLI command is kept as a manual recovery tool
-    // when the refresh_token chain breaks (e.g. after a long
-    // downtime), but the MCP child no longer invokes it.
-    const record = await withFreshTokens({
-      store: this.store,
-      http: this.http,
-      logger: this.logger,
-    });
+    // 60c4246), not step-up loss. The `aula refresh-stepup` CLI command
+    // is kept as a manual recovery tool when the refresh_token chain
+    // breaks (e.g. after a long downtime), but the MCP child no longer
+    // invokes it.
+    const record = await this.refresher.getFresh();
+    if (this.disposed) throw new Error('AulaContext has been disposed');
+
+    const sameTokens =
+      this.client !== undefined &&
+      this.cachedRecord !== undefined &&
+      this.cachedRecord.tokens.access_token === record.tokens.access_token &&
+      this.cachedRecord.tokens.refresh_token === record.tokens.refresh_token;
+    if (sameTokens && this.client) {
+      this.cachedRecord = record;
+      return this.client;
+    }
+
+    if (this.client) {
+      // Rotated (by us or out-of-band). Rebuilding rather than calling
+      // setTokens() mirrors what the fs.watch invalidation always did in
+      // production: the new client re-probes the API version and re-runs
+      // the profile-context bootstrap against the new session, and the
+      // widget manager — whose cached widget tokens were minted under the
+      // old session — is dropped with it.
+      this.logger.info('aula-context.tokens_rotated_rebuilding_client');
+      this.widgetManager = undefined;
+    }
     this.cachedRecord = record;
-    return new AulaClient({ tokens: record.tokens, http: this.http, logger: this.logger });
+    this.client = new AulaClient({ tokens: record.tokens, http: this.http, logger: this.logger });
+    return this.client;
   }
 }
 

@@ -133,10 +133,10 @@ const byObject = new WeakMap<TokenStore, TokenRefresher>();
  * constructed separately (every MCP session builds its own store object).
  */
 export function storeIdentity(store: TokenStore): string | undefined {
+  const identity = (store as { identity?: unknown }).identity;
+  if (typeof identity === 'string' && identity.length > 0) return identity;
   const filePath = (store as { filePath?: unknown }).filePath;
   if (typeof filePath === 'string' && filePath.length > 0) return `file:${filePath}`;
-  const path = (store as { path?: unknown }).path;
-  if (typeof path === 'string' && path.length > 0) return `path:${path}`;
   return undefined;
 }
 
