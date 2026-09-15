@@ -13,16 +13,20 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import type { IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { Readable } from 'node:stream';
 import type { AulaTokens } from '@aula-mcp/aula-auth';
-import type { AulaClient } from '@aula-mcp/aula-client';
+import type { AulaClient, AulaPost } from '@aula-mcp/aula-client';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { Hono } from 'hono';
+import { AttachmentStore, DEFAULT_ATTACHMENT_POLICY, type RequestFn } from './attachments.ts';
 import type { AulaContext } from './aula-context.ts';
-import { registerTools } from './tools.ts';
+import { makeSyntheticPdf } from './test-fixtures.ts';
+import { type RegisterToolsOptions, registerTools } from './tools.ts';
 
 const TOKENS: AulaTokens = {
   access_token: 'AT',
@@ -33,8 +37,8 @@ const TOKENS: AulaTokens = {
   obtained_at: Math.floor(Date.now() / 1000),
 };
 
-/** Mirrors ATTACHMENT_MAX_BYTES in tools.ts (module-private there). */
-const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+/** Small cap so the streaming tests stay fast. */
+const ATTACHMENT_MAX_BYTES = 64 * 1024;
 
 /** One attachment as Aula shapes it inside a thread message. */
 interface FakeAttachment {
@@ -60,11 +64,46 @@ const THREADS: Record<number, Array<{ attachments?: FakeAttachment[] }>> = {
     },
   ],
   78: [{}],
+  // Aula data pointing somewhere it never should — the server must still
+  // refuse, because the URL check is not about who supplied the URL.
+  79: [
+    {
+      attachments: [
+        { file: { name: 'internal.pdf', url: 'http://127.0.0.1:8080/secret.pdf' } },
+        { file: { name: 'redirected.pdf', url: 'https://cdn.test/redirect-internal' } },
+        { file: { name: 'other-host.pdf', url: 'https://attacker.example/x.pdf' } },
+      ],
+    },
+  ],
 };
+
+/** The posts feed, two pages deep. */
+const POSTS: AulaPost[][] = [
+  [
+    {
+      id: 314,
+      title: 'Sommerfest',
+      attachments: [
+        { file: { name: 'Sommerfest program.pdf', url: 'https://cdn.test/post-314-0' } },
+        { name: 'no-url.pdf' },
+        { file: { name: 'Bålhytten på Ærø - lørdag.pdf', url: 'https://cdn.test/post-314-1' } },
+      ],
+    },
+  ],
+  [
+    {
+      id: 42,
+      title: 'Side to',
+      attachments: [{ file: { name: 'p2.pdf', url: 'https://cdn.test/post-42-0' } }],
+    },
+  ],
+];
 
 interface FakeOptions {
   /** Thread id to its messages, for aula.messages.get_attachment. */
   threads?: Record<number, Array<{ attachments?: FakeAttachment[] }>>;
+  /** Pages of the posts feed, for aula.posts.get_attachment. */
+  posts?: AulaPost[][];
   /** Every presence.updatePresenceTemplate arg object, in call order. */
   templateWrites?: unknown[];
 }
@@ -117,6 +156,11 @@ function fakeContext(opts: FakeOptions = {}): AulaContext {
     async getMessagesForThread(threadId: number) {
       return { subject: 'Sommerfest', messages: opts.threads?.[threadId] ?? [] };
     },
+    async getPosts(args: { index?: number }) {
+      const pages = opts.posts ?? [];
+      const index = args.index ?? 0;
+      return { posts: pages[index] ?? [], moreMessagesExist: index < pages.length - 1 };
+    },
   };
   return {
     record: {
@@ -165,13 +209,16 @@ interface Harness {
  * AULA_MCP_WRITE at `registerTools` time, so covering both states needs two
  * independently-registered servers in the same file.
  */
-async function createHarness(context: AulaContext): Promise<Harness> {
+async function createHarness(
+  context: AulaContext,
+  options: RegisterToolsOptions = {},
+): Promise<Harness> {
   const app = new Hono();
   const mcp = new McpServer(
     { name: 'aula-mcp-test', version: '0.0.0-test' },
     { capabilities: { tools: {} } },
   );
-  registerTools(mcp, context);
+  registerTools(mcp, context, options);
   // Stateful mode — the SDK forbids reusing a stateless transport across
   // requests, which a multi-test suite necessarily does. Mirror what
   // production does in server.ts.
@@ -288,14 +335,79 @@ function setEnv(key: string, value: string | undefined): string | undefined {
   return previous;
 }
 
+// ---------------------------------------------------------------------------
+// Fake attachment transport
+//
+// The attachment store is given a fake `request` (what would open the TLS
+// connection) and a fake `lookup` (DNS), so the tools run their real
+// validation / streaming / storage code against synthetic responses without
+// a socket. Every response is routed by URL; the fake records each
+// connection so tests can assert what was — and was not — contacted.
+// ---------------------------------------------------------------------------
+
+const FAKE_PUBLIC_IP = '93.184.216.34';
+
+interface FakeRoute {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: string | Buffer | (() => Readable);
+}
+
+const routes = new Map<string, FakeRoute>();
+let connections: Array<{ address: string; hostname: string; url: string }> = [];
+
+const fakeRequest: RequestFn = async ({ address, hostname, url }) => {
+  connections.push({ address, hostname, url: url.toString() });
+  const route = routes.get(`${url.origin}${url.pathname}`);
+  if (!route) throw new Error(`no fake route for ${url}`);
+  const body =
+    typeof route.body === 'function'
+      ? route.body()
+      : Readable.from([Buffer.from(route.body ?? '')], { objectMode: false });
+  return Object.assign(body, {
+    statusCode: route.status ?? 200,
+    headers: Object.fromEntries(
+      Object.entries(route.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+    ),
+  }) as unknown as IncomingMessage;
+};
+
+function route(path: string, r: FakeRoute): void {
+  routes.set(`https://cdn.test${path}`, r);
+}
+
+let attachmentsDir: string;
+let attachmentStore: AttachmentStore;
 let harness: Harness;
 
 beforeAll(async () => {
-  harness = await createHarness(fakeContext({ threads: THREADS }));
+  attachmentsDir = await mkdtemp(join(tmpdir(), 'aula-mcp-attachments-'));
+  attachmentStore = new AttachmentStore({
+    rootDir: attachmentsDir,
+    policy: {
+      ...DEFAULT_ATTACHMENT_POLICY,
+      allowedHosts: ['cdn.test'],
+      maxBytes: ATTACHMENT_MAX_BYTES,
+      idleTimeoutMs: 500,
+      totalTimeoutMs: 5_000,
+    },
+    deps: { request: fakeRequest, lookup: async () => [FAKE_PUBLIC_IP] },
+  });
+  harness = await createHarness(fakeContext({ threads: THREADS, posts: POSTS }), {
+    attachments: attachmentStore,
+    pdfLimits: {
+      maxBytes: ATTACHMENT_MAX_BYTES,
+      maxPages: 10,
+      maxChars: 10_000,
+      timeoutMs: 20_000,
+    },
+  });
 });
 
 afterAll(async () => {
   await harness.close();
+  await attachmentStore.dispose();
+  await rm(attachmentsDir, { recursive: true, force: true });
 });
 
 describe('MCP server: tools/list', () => {
@@ -503,71 +615,69 @@ describe('MCP server: tools/call(aula.presence.set_template)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// aula.messages.get_attachment / aula.posts.get_attachment
+// aula.messages.get_attachment / aula.posts.get_attachment /
+// aula.utils.extract_pdf_text
 //
-// Both call the same downloadAttachmentToDisk helper, so each branch is
-// covered once through the messages tool and spot-checked from the posts one.
-//
-// `fetch` is stubbed for the whole block: the tool deliberately uses plain
-// global fetch (the CloudFront signature in the URL is the auth), and the
-// harness itself never touches global fetch — it dispatches through
-// `app.fetch()`. Downloads land in a per-run temp dir via
-// AULA_MCP_ATTACHMENTS_DIR, removed in afterAll.
+// The three tools share one AttachmentStore. The messages tool exercises the
+// download path in depth; the posts tool covers its own server-side lookup;
+// the PDF tool consumes the ids the other two hand out. Regression coverage
+// for audit findings 2, 3 and 6 lives here at the transport level, with the
+// unit-level detail in attachments.test.ts and pdf-extract.test.ts.
 // ---------------------------------------------------------------------------
 
+/** A body that keeps sending `chunkSize` bytes and never ends. */
+function endlessBody(chunkSize: number, chunks = Number.POSITIVE_INFINITY): () => Readable {
+  return () => {
+    let sent = 0;
+    return new Readable({
+      read() {
+        if (sent < chunks) {
+          sent++;
+          this.push(Buffer.alloc(chunkSize, 0x41));
+        }
+      },
+    });
+  };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
-  let dir: string;
-  let previousDir: string | undefined;
-  let realFetch: typeof globalThis.fetch;
-  let requested: string[] = [];
-
-  beforeAll(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'aula-mcp-attachments-'));
-    previousDir = setEnv('AULA_MCP_ATTACHMENTS_DIR', dir);
-    realFetch = globalThis.fetch;
-  });
-
-  afterAll(async () => {
-    globalThis.fetch = realFetch;
-    setEnv('AULA_MCP_ATTACHMENTS_DIR', previousDir);
-    await rm(dir, { recursive: true, force: true });
-  });
-
   afterEach(() => {
-    globalThis.fetch = realFetch;
+    routes.clear();
+    connections = [];
   });
 
-  /** Replace global fetch with one that records URLs and replays `respond`. */
-  function stubFetch(respond: (url: string) => Response): void {
-    requested = [];
-    globalThis.fetch = ((input: string | URL | Request) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      requested.push(url);
-      return Promise.resolve(respond(url));
-    }) as unknown as typeof globalThis.fetch;
-  }
-
-  test('downloads into AULA_MCP_ATTACHMENTS_DIR and returns the path', async () => {
-    stubFetch(() => new Response('%PDF-1.7 madplan'));
+  test('downloads into the attachment store and returns an opaque attachmentId, never the URL', async () => {
+    route('/a', {
+      headers: { 'content-type': 'application/pdf' },
+      body: '%PDF-1.7 madplan',
+    });
     const out = await harness.call(20, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 0,
     });
 
     expect(out.ok).toBe(true);
+    expect(out.attachmentId).toMatch(UUID_RE);
     expect(out.filename).toBe('kostplan.pdf');
     expect(out.mediaType).toBe('application/pdf');
     expect(out.bytes).toBe(16);
-    // The override is honoured, and the on-disk name is prefixed thread-index
-    // so two sources can't collide in the shared directory.
-    expect(dirname(out.path as string)).toBe(dir);
-    expect(out.path).toBe(join(dir, '77-0-kostplan.pdf'));
+    expect(typeof out.expiresAt).toBe('string');
+    // The file lives in a per-attachment directory under the store root…
+    expect(dirname(dirname(out.path as string))).toBe(attachmentsDir);
+    expect(basename(out.path as string)).toBe('kostplan.pdf');
     expect(await readFile(out.path as string, 'utf8')).toBe('%PDF-1.7 madplan');
-    expect(requested).toEqual(['https://cdn.test/a']);
+    // …the presigned URL is not echoed anywhere in the result…
+    expect(JSON.stringify(out)).not.toContain('cdn.test');
+    // …and the connection was pinned to the address that passed the check.
+    expect(connections).toEqual([
+      { address: FAKE_PUBLIC_IP, hostname: 'cdn.test', url: 'https://cdn.test/a' },
+    ]);
   });
 
   test('attachmentIndex flattens across messages in order', async () => {
-    stubFetch(() => new Response('seddel'));
+    route('/b', { body: 'seddel' });
     const out = await harness.call(21, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 1,
@@ -575,28 +685,26 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     // Index 1 lives on the *third* message — the empty one in between must
     // not consume an index.
     expect(out.filename).toBe('seddel.txt');
-    expect(requested).toEqual(['https://cdn.test/b']);
-    // No mediaType on this attachment, so the key is omitted rather than null.
+    expect(connections.map((c) => c.url)).toEqual(['https://cdn.test/b']);
+    // No mediaType on this attachment and none from the server, so the key
+    // is omitted rather than null.
     expect('mediaType' in out).toBe(false);
   });
 
   test('sanitises path separators out of the on-disk filename', async () => {
-    stubFetch(() => new Response('x'));
+    route('/c', { body: 'x' });
     const out = await harness.call(22, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 2,
     });
     // `filename` echoes what Aula sent; only the on-disk name is scrubbed.
     expect(out.filename).toBe('../../etc/pas swd.pdf');
-    expect(out.path).toBe(join(dir, '77-2-.._.._etc_pas swd.pdf'));
+    expect(basename(out.path as string)).toBe('.._.._etc_pas swd.pdf');
     // The whole point: nothing escapes the attachments directory.
-    expect(dirname(out.path as string)).toBe(dir);
+    expect(dirname(dirname(out.path as string))).toBe(attachmentsDir);
   });
 
   test('attachment_not_found when the index is past the end', async () => {
-    stubFetch(() => {
-      throw new Error('fetch must not be called for a missing attachment');
-    });
     const out = await harness.call(23, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 99,
@@ -605,13 +713,10 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     expect(out.threadId).toBe(77);
     expect(out.attachmentIndex).toBe(99);
     expect(out.totalAttachments).toBe(3);
-    expect(requested).toEqual([]);
+    expect(connections).toEqual([]);
   });
 
   test('attachment_not_found on a thread with no attachments at all', async () => {
-    stubFetch(() => {
-      throw new Error('fetch must not be called for a missing attachment');
-    });
     const out = await harness.call(24, 'aula.messages.get_attachment', {
       threadId: 78,
       attachmentIndex: 0,
@@ -620,41 +725,36 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     expect(out.totalAttachments).toBe(0);
   });
 
-  test('download_failed carries the CloudFront status and body excerpt', async () => {
-    stubFetch(
-      () =>
-        new Response('<Error><Code>AccessDenied</Code></Error>', {
-          status: 403,
-          statusText: 'Forbidden',
-        }),
-    );
+  test('download_failed carries the upstream status and a bounded body excerpt', async () => {
+    route('/a', {
+      status: 403,
+      body: `<Error><Code>AccessDenied</Code>${'x'.repeat(10_000)}</Error>`,
+    });
     const out = await harness.call(25, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 0,
     });
-    expect(out.ok).toBeUndefined();
+    expect(out.ok).toBe(false);
     expect(out.error).toBe('download_failed');
     expect(out.httpStatus).toBe(403);
     expect(out.filename).toBe('kostplan.pdf');
     expect(out.body).toContain('AccessDenied');
+    expect((out.body as string).length).toBeLessThanOrEqual(300);
     expect(out.path).toBeUndefined();
+    expect(out.attachmentId).toBeUndefined();
   });
 
   test('attachment_too_large from the declared content-length, before reading the body', async () => {
-    let bodyRead = false;
-    stubFetch(() => {
-      const res = new Response('tiny', {
-        headers: { 'content-length': String(ATTACHMENT_MAX_BYTES + 1) },
-      });
-      // Flag any attempt to buffer the body — the declared-size check must
-      // short-circuit first rather than pull 50MB down before rejecting it.
-      Object.defineProperty(res, 'arrayBuffer', {
-        value: () => {
-          bodyRead = true;
-          return Promise.resolve(new ArrayBuffer(4));
-        },
-      });
-      return res;
+    let reads = 0;
+    route('/a', {
+      headers: { 'content-length': String(ATTACHMENT_MAX_BYTES + 1) },
+      body: () =>
+        new Readable({
+          read() {
+            reads++;
+            this.push(Buffer.alloc(1024));
+          },
+        }),
     });
     const out = await harness.call(26, 'aula.messages.get_attachment', {
       threadId: 77,
@@ -664,26 +764,49 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     expect(out.bytes).toBe(ATTACHMENT_MAX_BYTES + 1);
     expect(out.maxBytes).toBe(ATTACHMENT_MAX_BYTES);
     expect(out.filename).toBe('kostplan.pdf');
-    expect(bodyRead).toBe(false);
+    expect(reads).toBe(0);
   });
 
-  test('attachment_too_large from the actual bytes when content-length is absent', async () => {
-    // No content-length header at all — the declared check passes and only
-    // the post-download byte count catches it.
-    stubFetch(() => new Response(new Uint8Array(ATTACHMENT_MAX_BYTES + 1)));
+  test('attachment_too_large while streaming a chunked body with no content-length', async () => {
+    route('/a', { body: endlessBody(4096) });
     const out = await harness.call(27, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 0,
     });
     expect(out.error).toBe('attachment_too_large');
-    expect(out.bytes).toBe(ATTACHMENT_MAX_BYTES + 1);
     expect(out.maxBytes).toBe(ATTACHMENT_MAX_BYTES);
     expect(out.path).toBeUndefined();
+    // Nothing partial is left in the store root.
+    const leftovers = await readdir(attachmentsDir);
+    for (const name of leftovers) {
+      expect((await readdir(join(attachmentsDir, name))).some((f) => f.endsWith('.part'))).toBe(
+        false,
+      );
+    }
+  });
+
+  test('a misleading small content-length does not bypass the byte counter', async () => {
+    route('/a', { headers: { 'content-length': '10' }, body: endlessBody(8192) });
+    const out = await harness.call(28, 'aula.messages.get_attachment', {
+      threadId: 77,
+      attachmentIndex: 0,
+    });
+    expect(out.error).toBe('attachment_too_large');
+  });
+
+  test('a stalled download is cancelled on the idle deadline', async () => {
+    route('/a', { body: endlessBody(16, 1) });
+    const out = await harness.call(29, 'aula.messages.get_attachment', {
+      threadId: 77,
+      attachmentIndex: 0,
+    });
+    expect(out.error).toBe('download_timeout');
+    expect(out.phase).toBe('body');
   });
 
   test('a file exactly on the cap is still accepted', async () => {
-    stubFetch(() => new Response(new Uint8Array(ATTACHMENT_MAX_BYTES)));
-    const out = await harness.call(28, 'aula.messages.get_attachment', {
+    route('/b', { body: Buffer.alloc(ATTACHMENT_MAX_BYTES, 0x42) });
+    const out = await harness.call(30, 'aula.messages.get_attachment', {
       threadId: 77,
       attachmentIndex: 1,
     });
@@ -691,58 +814,216 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     expect(out.bytes).toBe(ATTACHMENT_MAX_BYTES);
   });
 
-  // The posts tool differs only in how it arrives at a URL, so these two
-  // assert the shared helper behaves identically from the other call site.
-  test('aula.posts.get_attachment writes with its own post- prefix', async () => {
-    stubFetch(() => new Response('%PDF-1.7 nyhed'));
-    const out = await harness.call(29, 'aula.posts.get_attachment', {
+  test('refuses an internal http URL even when it comes from Aula data', async () => {
+    const out = await harness.call(31, 'aula.messages.get_attachment', {
+      threadId: 79,
+      attachmentIndex: 0,
+    });
+    expect(out.error).toBe('url_rejected');
+    expect(out.reason).toBe('scheme_not_https');
+    expect(connections).toEqual([]);
+    // The offending URL is not echoed back.
+    expect(JSON.stringify(out)).not.toContain('127.0.0.1');
+  });
+
+  test('refuses a redirect from the CDN to an internal address', async () => {
+    route('/redirect-internal', {
+      status: 302,
+      headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+    });
+    const out = await harness.call(32, 'aula.messages.get_attachment', {
+      threadId: 79,
+      attachmentIndex: 1,
+    });
+    expect(out.error).toBe('url_rejected');
+    expect(out.hop).toBe(1);
+    // Only the first hop was contacted; the redirect target never was.
+    expect(connections.map((c) => c.url)).toEqual(['https://cdn.test/redirect-internal']);
+  });
+
+  test('refuses an https host that is not on the attachment allowlist', async () => {
+    const out = await harness.call(33, 'aula.messages.get_attachment', {
+      threadId: 79,
+      attachmentIndex: 2,
+    });
+    expect(out.error).toBe('url_rejected');
+    expect(out.reason).toBe('host_not_allowed');
+    expect(connections).toEqual([]);
+  });
+});
+
+describe('MCP server: tools/call(aula.posts.get_attachment)', () => {
+  afterEach(() => {
+    routes.clear();
+    connections = [];
+  });
+
+  test('resolves the URL server-side from the post id and index', async () => {
+    route('/post-314-0', { body: '%PDF-1.7 nyhed' });
+    const out = await harness.call(40, 'aula.posts.get_attachment', {
       postId: 314,
-      url: 'https://cdn.test/post-attachment',
-      filename: 'Sommerfest program.pdf',
+      attachmentIndex: 0,
+      profileIds: [1],
     });
     expect(out.ok).toBe(true);
-    expect(out.path).toBe(join(dir, 'post-314-Sommerfest program.pdf'));
+    expect(out.attachmentId).toMatch(UUID_RE);
+    expect(out.filename).toBe('Sommerfest program.pdf');
+    expect(basename(out.path as string)).toBe('Sommerfest program.pdf');
     expect(out.bytes).toBe(14);
-    // The posts tool has no mediaType to pass, so the key stays off.
-    expect('mediaType' in out).toBe(false);
-    expect(requested).toEqual(['https://cdn.test/post-attachment']);
+    expect(connections.map((c) => c.url)).toEqual(['https://cdn.test/post-314-0']);
   });
 
-  test('keeps Danish letters in the on-disk filename', async () => {
-    // Regression guard: the sanitiser used `\w`, which is ASCII-only, so
-    // every æ, ø and å in a real Aula attachment name became an underscore
-    // — "Bålhytten" landed on disk as "B_lhytten".
-    stubFetch(() => new Response('%PDF-1.7'));
-    const out = await harness.call(31, 'aula.posts.get_attachment', {
+  test('the index counts only attachments with a usable URL, matching aula.posts.list', async () => {
+    route('/post-314-1', { body: '%PDF-1.7' });
+    const out = await harness.call(41, 'aula.posts.get_attachment', {
+      postId: 314,
+      attachmentIndex: 1,
+      profileIds: [1],
+    });
+    // Index 1 is "Bålhytten…", because the URL-less attachment in between
+    // is dropped by the same filter slimPost uses.
+    expect(out.ok).toBe(true);
+    expect(out.filename).toBe('Bålhytten på Ærø - lørdag.pdf');
+    // Regression guard: Danish letters survive on disk.
+    expect(basename(out.path as string)).toBe('Bålhytten på Ærø - lørdag.pdf');
+  });
+
+  test('walks the feed pages to find the post', async () => {
+    route('/post-42-0', { body: 'p2' });
+    const out = await harness.call(42, 'aula.posts.get_attachment', {
       postId: 42,
-      url: 'https://cdn.test/dansk',
-      filename: 'Bålhytten på Ærø - lørdag.pdf',
+      attachmentIndex: 0,
+      profileIds: [1],
     });
     expect(out.ok).toBe(true);
-    expect(out.path).toBe(join(dir, 'post-42-Bålhytten på Ærø - lørdag.pdf'));
-    expect(dirname(out.path as string)).toBe(dir);
+    expect(out.filename).toBe('p2.pdf');
   });
 
-  test('still scrubs separators and control characters from non-ASCII names', async () => {
-    // Widening the class to \p{L} must not widen what escapes the directory.
-    stubFetch(() => new Response('x'));
-    const out = await harness.call(32, 'aula.posts.get_attachment', {
-      postId: 42,
-      url: 'https://cdn.test/dansk',
-      filename: '../Bålhytten/ø\u0000.pdf',
+  test('post_not_found for an id that is not in the feed', async () => {
+    const out = await harness.call(43, 'aula.posts.get_attachment', {
+      postId: 999,
+      attachmentIndex: 0,
+      profileIds: [1],
     });
-    expect(out.path).toBe(join(dir, 'post-42-.._Bålhytten_ø_.pdf'));
-    expect(dirname(out.path as string)).toBe(dir);
+    expect(out.error).toBe('post_not_found');
+    expect(connections).toEqual([]);
   });
 
-  test('aula.posts.get_attachment surfaces download_failed the same way', async () => {
-    stubFetch(() => new Response('gone', { status: 404 }));
-    const out = await harness.call(30, 'aula.posts.get_attachment', {
+  test('attachment_not_found for an index past the end', async () => {
+    const out = await harness.call(44, 'aula.posts.get_attachment', {
       postId: 314,
-      url: 'https://cdn.test/post-attachment',
-      filename: 'Sommerfest program.pdf',
+      attachmentIndex: 7,
+      profileIds: [1],
+    });
+    expect(out.error).toBe('attachment_not_found');
+    expect(out.totalAttachments).toBe(2);
+    expect(connections).toEqual([]);
+  });
+
+  test('no longer accepts a caller-supplied URL (the audit SSRF)', async () => {
+    const r = await harness.rpc({
+      jsonrpc: '2.0',
+      id: 45,
+      method: 'tools/call',
+      params: {
+        name: 'aula.posts.get_attachment',
+        arguments: { postId: 314, url: 'http://127.0.0.1:8080/secret.pdf', filename: 'x.pdf' },
+      },
+    });
+    // attachmentIndex is required, so the schema rejects the old shape…
+    expect(JSON.stringify(r).toLowerCase()).toMatch(/error|invalid/);
+    // …and nothing was fetched.
+    expect(connections).toEqual([]);
+  });
+
+  test('surfaces download_failed the same way as the messages tool', async () => {
+    route('/post-314-0', { status: 404, body: 'gone' });
+    const out = await harness.call(46, 'aula.posts.get_attachment', {
+      postId: 314,
+      attachmentIndex: 0,
+      profileIds: [1],
     });
     expect(out.error).toBe('download_failed');
     expect(out.httpStatus).toBe(404);
+  });
+});
+
+describe('MCP server: tools/call(aula.utils.extract_pdf_text)', () => {
+  afterEach(() => {
+    routes.clear();
+    connections = [];
+  });
+
+  test('extracts text from an attachment downloaded by this server', async () => {
+    route('/a', {
+      headers: { 'content-type': 'application/pdf' },
+      body: makeSyntheticPdf('Madplan uge 38', 2),
+    });
+    const downloaded = await harness.call(50, 'aula.messages.get_attachment', {
+      threadId: 77,
+      attachmentIndex: 0,
+    });
+    expect(downloaded.ok).toBe(true);
+    const out = await harness.call(51, 'aula.utils.extract_pdf_text', {
+      attachmentId: downloaded.attachmentId,
+    });
+    expect(out.ok).toBe(true);
+    expect(out.filename).toBe('kostplan.pdf');
+    expect(out.text).toContain('Madplan uge 38 page 1');
+    expect(out.text).toContain('Madplan uge 38 page 2');
+    expect(out.pages).toBe(2);
+    expect(out.truncated).toBe(false);
+  });
+
+  test('refuses an unknown attachment id', async () => {
+    const out = await harness.call(52, 'aula.utils.extract_pdf_text', {
+      attachmentId: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(out.ok).toBe(false);
+    expect(out.error).toBe('unknown_attachment');
+  });
+
+  test('no longer accepts a filesystem path (the audit arbitrary-read)', async () => {
+    for (const bad of [
+      { path: '/etc/passwd' },
+      { attachmentId: '/etc/passwd' },
+      { attachmentId: '../../etc/passwd' },
+      { attachmentId: `${attachmentsDir}/anything.pdf` },
+      { attachmentId: 'not-a-uuid' },
+    ]) {
+      const r = await harness.rpc({
+        jsonrpc: '2.0',
+        id: 53,
+        method: 'tools/call',
+        params: { name: 'aula.utils.extract_pdf_text', arguments: bad },
+      });
+      expect(JSON.stringify(r).toLowerCase()).toMatch(/error|invalid/);
+    }
+  });
+
+  test('reports not_a_pdf for a downloaded attachment that is not a PDF', async () => {
+    route('/b', { body: 'plain text seddel' });
+    const downloaded = await harness.call(54, 'aula.messages.get_attachment', {
+      threadId: 77,
+      attachmentIndex: 1,
+    });
+    const out = await harness.call(55, 'aula.utils.extract_pdf_text', {
+      attachmentId: downloaded.attachmentId,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.error).toBe('not_a_pdf');
+  });
+
+  test('refuses an id whose file has since been removed from the store', async () => {
+    route('/a', { body: makeSyntheticPdf('Gone') });
+    const downloaded = await harness.call(56, 'aula.messages.get_attachment', {
+      threadId: 77,
+      attachmentIndex: 0,
+    });
+    await attachmentStore.remove(downloaded.attachmentId as string);
+    const out = await harness.call(57, 'aula.utils.extract_pdf_text', {
+      attachmentId: downloaded.attachmentId,
+    });
+    expect(out.error).toBe('unknown_attachment');
   });
 });

@@ -236,7 +236,14 @@ describe('slimPost', () => {
     expect(slim.institution).toBe('Klub Solsikken');
     expect(slim.isImportant).toBe(true);
     expect(slim.content).toBe('Kom glad');
-    expect(slim.attachments?.[0]?.url).toBe('https://cdn/plan.pdf');
+    // The model gets an index to hand back to aula.posts.get_attachment —
+    // never the presigned URL (audit finding 2).
+    expect(slim.attachments?.[0]).toEqual({
+      index: 0,
+      name: 'plan.pdf',
+      mediaType: 'application/pdf',
+    });
+    expect(JSON.stringify(slim)).not.toContain('https://cdn/plan.pdf');
   });
 
   test('falls back to timestamp when publishAt is absent', () => {
@@ -249,12 +256,13 @@ describe('slimPost', () => {
     expect('attachments' in slim).toBe(false);
   });
 
-  test('drops attachments with no usable URL', () => {
+  test('drops attachments with no usable URL and indexes the survivors', () => {
     const slim = slimPost({
       id: 1,
       attachments: [{ name: 'ingen-url.pdf' }, { file: { name: 'ok.pdf', url: 'https://cdn/ok' } }],
     });
     expect(slim.attachments).toHaveLength(1);
     expect(slim.attachments?.[0]?.name).toBe('ok.pdf');
+    expect(slim.attachments?.[0]?.index).toBe(0);
   });
 });
