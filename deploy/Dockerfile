@@ -5,19 +5,31 @@
 # up moving upstream main.
 #
 # Node is used for `pnpm install` because some workspace packages import
-# `node:sqlite` at install time. Bun is the runtime (`Bun.serve`).
-
-FROM oven/bun:1.3-debian AS bun-bin
+# `node:sqlite` at install time. Bun is the runtime (`Bun.serve`) and is
+# installed from a version-pinned GitHub release (not bun.sh/install, which
+# would float). A multi-stage `COPY --from=oven/bun` is avoided so the
+# image still builds on overlayfs-limited hosts.
 
 FROM node:24-bookworm-slim
 
-COPY --from=bun-bin /usr/local/bin/bun /usr/local/bin/bun
+ARG BUN_VERSION=1.3.3
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu \
+  && apt-get install -y --no-install-recommends ca-certificates curl gosu unzip \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 aula \
-  && useradd --uid 10001 --gid aula --home-dir /var/lib/aula-mcp --create-home --shell /usr/sbin/nologin aula
+  && useradd --uid 10001 --gid aula --home-dir /var/lib/aula-mcp --create-home --shell /usr/sbin/nologin aula \
+  && arch="$(dpkg --print-architecture)" \
+  && case "$arch" in \
+       amd64) bun_arch=x64 ;; \
+       arm64) bun_arch=aarch64 ;; \
+       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bun_arch}.zip" -o /tmp/bun.zip \
+  && unzip -q /tmp/bun.zip -d /tmp \
+  && install -m 0755 "/tmp/bun-linux-${bun_arch}/bun" /usr/local/bin/bun \
+  && rm -rf /tmp/bun.zip "/tmp/bun-linux-${bun_arch}" \
+  && bun --version
 
 RUN corepack enable \
   && corepack prepare pnpm@11.1.3 --activate
