@@ -65,6 +65,7 @@ export {
   pkcs7Unpad,
 } from './encoding.ts';
 export { AulaAuthError, HtmlParseError, RedirectLoopError } from './errors.ts';
+export { acquireFileLock, FileLockError, type FileLockOptions, withFileLock } from './file-lock.ts';
 export {
   extractAllAttr,
   extractAttr,
@@ -139,21 +140,38 @@ export {
 } from './srp.ts';
 export { generateState } from './state.ts';
 export {
+  getTokenRefresher,
+  resetTokenRefreshers,
+  storeIdentity,
+  TokenRefresher,
+  type TokenRefresherOptions,
+} from './token-refresh.ts';
+export {
+  decodeKeyMaterial,
+  deriveLockPath,
   EncryptedFileTokenStore,
   type EncryptedFileTokenStoreOptions,
+  generateKeyMaterial,
+  isStrongKeyMaterial,
   MemoryTokenStore,
+  readKeyFile,
   type StoredTokenRecord,
   type TokenStore,
   TokenStoreError,
   type WithFreshTokensArgs,
   withFreshTokens,
+  writeFileAtomic,
+  writeKeyFile,
 } from './token-store.ts';
 export {
   CompositeTracer,
+  DEFAULT_TRANSCRIPT_MAX_BYTES,
   formatTraceText,
   InMemoryTracer,
   JsonlFileTracer,
+  type JsonlFileTracerOptions,
   noopTracer,
+  redactText,
   SECRET_BODY_FIELD_NAMES,
   SECRET_URL_PARAM_NAMES,
   sanitizeHeaders,
