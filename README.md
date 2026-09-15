@@ -61,7 +61,7 @@ Hvad selve `aula-mcp`-serveren gør (og ikke gør). Hvor dataen ender bagefter e
 - **Serveren binder kun til `127.0.0.1`.** Den nægter at binde til en ikke-loopback adresse medmindre du sætter `AULA_MCP_ALLOW_REMOTE=1`. Default: kun programmer på din egen computer kan ramme den.
 - **Ingen telemetri, ingen tredjepart.** Programmet taler kun med Aula's egne servere (`api.aula.dk`, `login.aula.dk`), MitID (`nemlog-in.mitid.dk`) og vendor-API'erne (EasyIQ, Meebook m.fl. — hvis din skole har dem).
 - **MitID-godkendelsen går igennem MitID's egen infrastruktur.** Protokollen er skrevet om i TypeScript, men selve godkendelsen (QR-koden i MitID-appen) sker som altid mellem din enhed og nemlog-in.dk.
-- **`--debug`-tracen er opt-in og automatisk redaktet.** Cookies, OAuth-koder, MitID-payloads, M1-værdier, flowValueProof, adgangstokens osv. fjernes *før* noget skrives til disk. Trygt at vedhæfte en GitHub-issue.
+- **`--debug`-tracen er opt-in og redaktet, men ikke automatisk sikker at dele.** Cookies, OAuth-koder, MitID-payloads, M1-værdier, flowValueProof, adgangstokens og URL-bærende headers fjernes *før* noget skrives til disk. Gennemlæs stadig filen — redaktion er best-effort, ikke et løfte.
 - **Loopback-only = familien kan ikke ramme serveren fra deres egen enhed.** Skal flere enheder i husstanden kunne spørge, så enten reverse proxy (se Self-hosting) eller en Home Assistant-integration på et tidspunkt.
 
 ---
@@ -246,7 +246,7 @@ aula.dithjem.dk {
 
 `AULA_MCP_HOST` forbliver `127.0.0.1` — Caddy står for TLS, basic auth, rate limit. Det er Caddy der er på det offentlige internet, ikke selve MCP-serveren.
 
-> ⚠️ Hvis du *skal* exposé serveren direkte (springe proxy-laget over) skal du eksplicit sætte `AULA_MCP_ALLOW_REMOTE=1` — det er en kontrolleret, tilsigtet handling, ikke et uheld.
+> ⚠️ `AULA_MCP_ALLOW_REMOTE=1` tillader kun at binde til et andet interface. Det er **ikke** authentication. En remote bind kræver også `AULA_MCP_AUTH_TOKEN` (≥ 32 tegn) og `AULA_MCP_ALLOWED_HOSTS`. MCP-klienter sender `Authorization: Bearer <token>`.
 
 ### Mulighed 3: Home Assistant add-on
 
@@ -262,7 +262,16 @@ Korte stik:
 
 ### Mulighed 4: VPS i Tyskland (Hetzner, Coolify)
 
-Hvis du allerede har en europæisk VPS (Hetzner, Scaleway, OVH) og en domæne — så er det bare en `git clone` + `bun install` + systemd-unit som mulighed 1.
+**👉 Fuld guide: [`deploy/README.md`](./deploy/README.md)** — Dockerfile, Compose, secrets, token-import og recovery.
+
+Korte stik:
+
+- Imagets build-context er denne fork (frozen lockfile). Den cloner ikke upstream `main`.
+- Ét authenticated HTTPS-endpoint bag Coolifys proxy. Publicér **ikke** 7878/8099 på hosten.
+- Setup/login-UI'en er slået fra. Login sker på en workstation (`aula login`) + `aula tokens export` / `scp` af `tokens.json` + bundle-`.key`.
+- `/healthz` = processen lever. `/readyz` = der ligger brugbare Aula-tokens. De to er ikke det samme.
+- `AULA_MCP_RAW` og `AULA_MCP_WRITE` er slået fra i entrypoint'en. Read-only tools sænker ikke privilegierne på selve Aula-credentialet.
+- Hosting-IP'er kan ramme STIL's bot-defense. Bypass den ikke — log ind interaktivt og overfør bundtet.
 
 ### Backup & nøgle-håndtering
 
@@ -330,13 +339,13 @@ aula --help
 
 | Kommando | Hvad den gør |
 | -------- | ------------ |
-| `aula login` | Kører hele MitID-flowet (APP-metoden er default — scan QR med MitID-appen). Gemmer tokens. `--debug` opfanger en saneret wire-transcript så fejl er diagnoserbare. |
+| `aula login` | Kører hele MitID-flowet (APP-metoden er default — scan QR med MitID-appen). Gemmer tokens. Cookie-jar'en skrives kun med `AULA_MCP_PERSIST_COOKIES=1` (workstation `refresh-stepup`; kopier den ikke til en server). `--debug` opfanger en redigeret wire-transcript. |
 | `aula status` | Viser om der er tokens, deres udløbstid og den aktive identitet. Kontakter ikke netværket. Exit-kode 1 hvis der ingen tokens er. |
 | `aula whoami` | Indlæser tokens (refresher hvis nødvendigt), kalder `getProfilesByLogin` + `getProfileContext`. Smoke-test af at hele auth + client-pipelinen virker. |
 | `aula doctor` | Kører hvert read-endpoint igennem og rapporterer per-call status med svartid. Det hurtigste "virker det her?"-tjek. `--verbose` dumper wire-transcripten inline ved fejl. |
 | `aula log` | Seneste login-forsøg (success/failure, timestamps, fejlklasse). |
 | `aula transcript` | Inspicér opfangede `--debug`-transcripts; `prune` beholder de seneste N (default 10). |
-| `aula logout` | Sletter de gemte tokens. Krypteringsnøglen beholdes så næste login genbruger den. |
+| `aula logout` | Sletter tokens **og** `cookies.json`. Krypteringsnøglen beholdes. Aula-refresh-tokenet kan ikke revokes upstream herfra. |
 
 Komplet hjælp med eksempler: `pnpm aula --help`
 
@@ -363,11 +372,17 @@ Komplet hjælp med eksempler: `pnpm aula --help`
 | `AULA_MCP_RAW=1` | off | Aktiverer `aula.raw_request` escape-hatch-toolet. |
 | `AULA_MCP_WRITE=1` | off | Aktiverer skrive-tools (`aula.presence.set_template` — sæt komme/gå-tider). Serveren er read-only uden den. |
 | `AULA_MCP_LOG=1` | off | Verbose console-logs fra auth/client-lagene (samme redaktion som wire-transcripts). |
-| `AULA_MCP_ALLOW_REMOTE=1` | off | Tillader at binde til ikke-loopback adresser (fx bag en reverse proxy). |
+| `AULA_MCP_ALLOW_REMOTE=1` | off | Tillader at binde til ikke-loopback adresser. **Ikke** authentication. |
+| `AULA_MCP_AUTH_TOKEN` | (påkrævet) | Bearer-token MCP-klienter skal sende. ≥ 32 tegn (`openssl rand -hex 32`). `AULA_MCP_AUTH=none` kun på loopback. |
+| `AULA_MCP_AUTH_TOKEN_FILE` | unset | Læs tokenet fra en fil (Docker/Coolify secrets). |
+| `AULA_MCP_ALLOWED_HOSTS` | (påkrævet remote) | Kommaseparerede Host-værdier. `*` afvises. Loopback-navne accepteres altid. |
+| `AULA_MCP_ALLOWED_ORIGINS` | unset | Kommaseparerede Origins. Requests uden Origin (non-browser) går igennem. |
+| `AULA_MCP_LEGACY_SSE=1` | off | Slår `/sse` + `/messages` til (HA). Fra i Coolify-imaget. |
+| `AULA_MCP_INGRESS_PORT` | unset | Slår setup/login-UI'en til. Unset i standalone. Kræver `AULA_MCP_SETUP_AUTH`. |
 
 ### Wire-transcripts
 
-`--debug`-tilstand tee'r en JSONL-transcript af hvert HTTP-request/response til `~/.config/aula-mcp/transcripts/login-<timestamp>.jsonl`. Cookies, OAuth/SAML-payloads, MitID-auth-koder, adgangskoder, M1, flowValueProof, `access_token`-query-parameter og andre hemmelige felter bliver alle redaktet (`<redacted N chars>`). Transcripten kan trygt vedhæftes en GitHub-issue.
+`--debug`-tilstand tee'r en JSONL-transcript af hvert HTTP-request/response til `~/.config/aula-mcp/transcripts/login-<timestamp>.jsonl` (mode `0600`, størrelsesloft). Cookies, OAuth/SAML-payloads, MitID-auth-koder, Location/Referer-URL'er, skjulte HTML-felter, JWT'er og `access_token` redigeres før skrivning. Det er **ikke** et løfte om at filen er sikker at dele — læs den igennem.
 
 `aula transcript view <file>` pretty-printer en af dem.
 

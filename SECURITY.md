@@ -33,7 +33,9 @@ Out of scope:
 
 - Tokens are AES-256-GCM-encrypted at rest (`~/.config/aula-mcp/tokens.json`, mode `0600`).
 - The encryption key is resolved from an explicit Buffer, then `AULA_MCP_KEY`, then a generated key file (`chmod 600`). The README documents which is strongest.
-- Wire-trace transcripts are opt-in (`--debug`) and redact known-secret headers, body fields, and URL query parameters before any line is written.
+- Wire-trace transcripts are opt-in (`--debug`), mode `0600`, size-capped, and redact known-secret headers (including `Location`/`Referer`), HTML form fields, JWTs, body fields, and URL query parameters before any line is written. Redaction is best-effort — do not treat a transcript as automatically safe to share.
+- The HTTP MCP server requires `Authorization: Bearer <AULA_MCP_AUTH_TOKEN>` unless `AULA_MCP_AUTH=none` is set on a loopback bind. `AULA_MCP_ALLOW_REMOTE=1` is not authentication. Host and Origin headers are validated. Legacy `/sse` is off unless `AULA_MCP_LEGACY_SSE=1`.
+- Attachment downloads resolve URLs server-side from Aula data, require HTTPS on an allow-listed host, pin DNS to a public address, and never accept a caller-supplied URL. PDF text extraction only accepts opaque attachment ids.
 - The MCP server binds to `127.0.0.1` by default.
 - No headless browser is used for MitID — the dependency footprint is auditable.
 

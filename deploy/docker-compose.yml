@@ -1,0 +1,81 @@
+# Single-household Coolify / Compose deploy.
+#
+# One replica. Two processes sharing the same token file can refresh
+# concurrently even with the file lock — do not scale this service.
+#
+# The MCP port is *not* published on the host. Coolify's HTTPS proxy (or
+# another reverse proxy on `aula_mcp_net`) reaches the container internally.
+# Publishing 7878/8099 on 0.0.0.0 would bypass that proxy and the TLS
+# terminator.
+
+name: aula-mcp
+
+services:
+  aula-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aula-mcp:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+      - /var/tmp/aula-attachments:mode=0700,uid=10001,gid=10001,size=256m
+    environment:
+      AULA_MCP_HOST: "0.0.0.0"
+      AULA_MCP_PORT: "7878"
+      AULA_MCP_ALLOW_REMOTE: "1"
+      AULA_MCP_DIR: /var/lib/aula-mcp
+      AULA_MCP_ATTACHMENTS_DIR: /var/tmp/aula-attachments
+      AULA_MCP_NO_KEYCHAIN: "1"
+      # Required. Generate with `openssl rand -hex 32`. MCP clients send
+      # `Authorization: Bearer <this>`. Never commit the value.
+      AULA_MCP_AUTH_TOKEN: "${AULA_MCP_AUTH_TOKEN:?set AULA_MCP_AUTH_TOKEN}"
+      # Required. Public hostname clients put in the Host header
+      # (e.g. aula-mcp.example.com). Comma-separated.
+      AULA_MCP_ALLOWED_HOSTS: "${AULA_MCP_ALLOWED_HOSTS:?set AULA_MCP_ALLOWED_HOSTS}"
+      # Optional. Origins of browser-based MCP clients. Non-browser clients
+      # omit Origin and are fine without this.
+      AULA_MCP_ALLOWED_ORIGINS: "${AULA_MCP_ALLOWED_ORIGINS:-}"
+      # 64 hex chars. Store outside the token volume so a volume backup is
+      # not enough to decrypt tokens.
+      AULA_MCP_KEY: "${AULA_MCP_KEY:-}"
+      AULA_MCP_LOG: "${AULA_MCP_LOG:-}"
+    volumes:
+      - aula-tokens:/var/lib/aula-mcp
+    expose:
+      - "7878"
+    networks:
+      - aula_mcp_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:7878/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  aula-tokens:
+
+networks:
+  aula_mcp_net:
+    driver: bridge
+    internal: false
+    attachable: false
