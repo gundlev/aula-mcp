@@ -14,6 +14,7 @@ import type { Logger } from './logger.ts';
 import { silentLogger } from './logger.ts';
 import {
   noopTracer,
+  redactText,
   sanitizeHeaders,
   sanitizeRequestBody,
   sanitizeResponseBody,
@@ -127,7 +128,8 @@ export class AulaHttpClient {
       // The wire trace is the user's primary debugging surface, so we record
       // the failure as a synthetic status-0 entry before re-throwing.
       const durationMs = Date.now() - start;
-      const message = (e as Error).message ?? String(e);
+      // Runtime error messages frequently embed the URL they failed on.
+      const message = redactText((e as Error).message ?? String(e));
       if (this.tracer !== noopTracer) {
         this.tracer.record({
           ts: new Date().toISOString(),
