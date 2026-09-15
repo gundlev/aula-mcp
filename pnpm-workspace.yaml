@@ -12,8 +12,24 @@ onlyBuiltDependencies:
 
 # Force patched versions of transitive deps with open CVEs (via
 # @modelcontextprotocol/sdk). Drop these once the SDK bumps them upstream.
+#
+# Reachability notes (Sept 2026 production audit):
+#   - fast-uri (via ajv, used by the SDK's JSON-schema validation) — four
+#     high advisories in <3.1.6. ajv validates tool-call arguments on the MCP
+#     transport, so a malicious client could reach the parser; patched.
+#   - qs (via express/body-parser in the SDK's Node transport) — two moderate
+#     advisories in <6.16.0. This server never mounts the Express transport
+#     (it uses WebStandardStreamableHTTPServerTransport on Bun), so the
+#     parser is not on any request path here; patched anyway.
+#   - hono — the SDK and @hono/node-server pulled 4.13.3 while our direct
+#     dependency was already 4.13.5. The three moderate advisories (toSSG
+#     path escape, parseBody nesting, query-after-fragment) sit in code this
+#     server does not call, but a single patched copy is simpler to reason
+#     about than two versions.
 overrides:
-  fast-uri: ^3.1.2
+  fast-uri: ^3.1.6
+  qs: ^6.16.0
+  hono: ^4.13.5
   ip-address: ^10.1.1
   # cheerio pulls undici ^7.19.0 for its fromURL() helper. We only ever call
   # cheerio.load() on strings we already fetched ourselves, so none of these
