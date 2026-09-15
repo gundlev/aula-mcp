@@ -52,9 +52,13 @@ describe('aula logout', () => {
       ignoreEnv: true,
     });
     await store.save(RECORD);
-    await writeFile(join(dir, 'cookies.json'), '{"cookies":[{"name":"SYNTH-SESSION","value":"keep-me"}]}', {
-      mode: 0o600,
-    });
+    await writeFile(
+      join(dir, 'cookies.json'),
+      '{"cookies":[{"name":"SYNTH-SESSION","value":"keep-me"}]}',
+      {
+        mode: 0o600,
+      },
+    );
 
     await runLogout();
 

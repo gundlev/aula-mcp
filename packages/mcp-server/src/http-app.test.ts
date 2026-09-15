@@ -9,16 +9,16 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Logger } from '@aula-mcp/aula-auth';
 import { silentLogger } from '@aula-mcp/aula-auth';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AulaContext } from './aula-context.ts';
 import { digest, loadServerConfig, type ServerConfig } from './config.ts';
 import {
   checkBearer,
   createHttpApp,
-  hostHeaderAllowed,
   type HttpApp,
+  hostHeaderAllowed,
   originAllowed,
   readBoundedRequest,
   splitHostHeader,
@@ -59,7 +59,10 @@ function fixture(): Fixture {
     release: () => release(),
     createApp: () => {
       fx.created++;
-      const mcp = new McpServer({ name: 'fake', version: '0.0.0' }, { capabilities: { tools: {} } });
+      const mcp = new McpServer(
+        { name: 'fake', version: '0.0.0' },
+        { capabilities: { tools: {} } },
+      );
       mcp.registerTool('ping', { description: 'ping' }, async () => ({
         content: [{ type: 'text', text: 'pong' }],
       }));
@@ -105,7 +108,12 @@ function headers(opts: ClientOptions): Record<string, string> {
   return h;
 }
 
-function post(app: HttpApp, path: string, body: unknown, opts: ClientOptions = {}): Promise<Response> {
+function post(
+  app: HttpApp,
+  path: string,
+  body: unknown,
+  opts: ClientOptions = {},
+): Promise<Response> {
   return Promise.resolve(
     app.fetch(
       new Request(`https://${opts.host ?? PUBLIC_HOST}${path}`, {
@@ -117,9 +125,16 @@ function post(app: HttpApp, path: string, body: unknown, opts: ClientOptions = {
   );
 }
 
-function request(app: HttpApp, method: string, path: string, opts: ClientOptions = {}): Promise<Response> {
+function request(
+  app: HttpApp,
+  method: string,
+  path: string,
+  opts: ClientOptions = {},
+): Promise<Response> {
   return Promise.resolve(
-    app.fetch(new Request(`https://${opts.host ?? PUBLIC_HOST}${path}`, { method, headers: headers(opts) })),
+    app.fetch(
+      new Request(`https://${opts.host ?? PUBLIC_HOST}${path}`, { method, headers: headers(opts) }),
+    ),
   );
 }
 
@@ -129,12 +144,19 @@ async function initialize(app: HttpApp, opts: ClientOptions = {}): Promise<strin
   expect(res.status).toBe(200);
   const sessionId = res.headers.get('mcp-session-id');
   if (!sessionId) throw new Error('no session id');
-  const ack = await post(app, '/mcp', { jsonrpc: '2.0', method: 'notifications/initialized' }, { ...opts, sessionId });
+  const ack = await post(
+    app,
+    '/mcp',
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { ...opts, sessionId },
+  );
   expect(ack.status).toBe(202);
   return sessionId;
 }
 
-async function rpcResult(res: Response): Promise<{ result?: unknown; error?: { code: number; message: string } }> {
+async function rpcResult(
+  res: Response,
+): Promise<{ result?: unknown; error?: { code: number; message: string } }> {
   const text = await res.text();
   if (res.headers.get('content-type')?.includes('text/event-stream')) {
     const line = text.split('\n').find((l) => l.startsWith('data:'));
@@ -143,8 +165,17 @@ async function rpcResult(res: Response): Promise<{ result?: unknown; error?: { c
   return JSON.parse(text) as never;
 }
 
-async function listTools(app: HttpApp, sessionId: string, opts: ClientOptions = {}): Promise<string[]> {
-  const res = await post(app, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { ...opts, sessionId });
+async function listTools(
+  app: HttpApp,
+  sessionId: string,
+  opts: ClientOptions = {},
+): Promise<string[]> {
+  const res = await post(
+    app,
+    '/mcp',
+    { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    { ...opts, sessionId },
+  );
   expect(res.status).toBe(200);
   const body = (await rpcResult(res)) as { result: { tools: Array<{ name: string }> } };
   return body.result.tools.map((t) => t.name);
@@ -152,7 +183,11 @@ async function listTools(app: HttpApp, sessionId: string, opts: ClientOptions = 
 
 const apps: HttpApp[] = [];
 let clock = 1_000_000;
-function build(cfg: ServerConfig, fx: Fixture, readiness?: () => Promise<{ ready: boolean; reason?: string }>) {
+function build(
+  cfg: ServerConfig,
+  fx: Fixture,
+  readiness?: () => Promise<{ ready: boolean; reason?: string }>,
+) {
   const app = createHttpApp({
     config: cfg,
     logger: silentLogger,
@@ -209,7 +244,12 @@ describe('HTTP MCP server: client authentication', () => {
   test('a valid session id is not a substitute for the credential', async () => {
     const app = build(config(), fixture());
     const sessionId = await initialize(app);
-    const res = await post(app, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { auth: null, sessionId });
+    const res = await post(
+      app,
+      '/mcp',
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { auth: null, sessionId },
+    );
     expect(res.status).toBe(401);
     // GET (SSE channel) and DELETE (session close) are gated too.
     expect((await request(app, 'GET', '/mcp', { auth: null, sessionId })).status).toBe(401);
@@ -268,9 +308,16 @@ describe('HTTP MCP server: client authentication', () => {
       error: (m, meta) => lines.push(`${m} ${JSON.stringify(meta ?? {})}`),
     };
     const fx = fixture();
-    const app = createHttpApp({ config: config(), logger, createApp: fx.createApp, now: () => clock });
+    const app = createHttpApp({
+      config: config(),
+      logger,
+      createApp: fx.createApp,
+      now: () => clock,
+    });
     apps.push(app);
-    await post(app, '/mcp', INITIALIZE, { auth: 'Bearer wrong-token-value-that-must-not-be-logged-000000' });
+    await post(app, '/mcp', INITIALIZE, {
+      auth: 'Bearer wrong-token-value-that-must-not-be-logged-000000',
+    });
     await initialize(app);
     const joined = lines.join('\n');
     expect(joined).toContain('auth_failed');
@@ -283,7 +330,12 @@ describe('HTTP MCP server: Host and Origin validation', () => {
   test('a Host that is not on the allow-list is 421 even with the right token', async () => {
     const fx = fixture();
     const app = build(config(), fx);
-    for (const host of ['evil.example', 'aula-mcp.example.com.evil.example', '203.0.113.7:7878', '']) {
+    for (const host of [
+      'evil.example',
+      'aula-mcp.example.com.evil.example',
+      '203.0.113.7:7878',
+      '',
+    ]) {
       const res = await post(app, '/mcp', INITIALIZE, { host });
       expect([421, 400]).toContain(res.status);
     }
@@ -291,12 +343,21 @@ describe('HTTP MCP server: Host and Origin validation', () => {
   });
 
   test('allowed hosts match case-insensitively, with or without an explicit port', async () => {
-    const app = build(config({ AULA_MCP_ALLOWED_HOSTS: `${PUBLIC_HOST}, alt.example.com:8443` }), fixture());
-    expect((await post(app, '/mcp', INITIALIZE, { host: 'AULA-MCP.EXAMPLE.COM' })).status).toBe(200);
+    const app = build(
+      config({ AULA_MCP_ALLOWED_HOSTS: `${PUBLIC_HOST}, alt.example.com:8443` }),
+      fixture(),
+    );
+    expect((await post(app, '/mcp', INITIALIZE, { host: 'AULA-MCP.EXAMPLE.COM' })).status).toBe(
+      200,
+    );
     expect((await post(app, '/mcp', INITIALIZE, { host: `${PUBLIC_HOST}:443` })).status).toBe(200);
-    expect((await post(app, '/mcp', INITIALIZE, { host: 'alt.example.com:8443' })).status).toBe(200);
+    expect((await post(app, '/mcp', INITIALIZE, { host: 'alt.example.com:8443' })).status).toBe(
+      200,
+    );
     expect((await post(app, '/mcp', INITIALIZE, { host: 'alt.example.com' })).status).toBe(421);
-    expect((await post(app, '/mcp', INITIALIZE, { host: 'alt.example.com:9999' })).status).toBe(421);
+    expect((await post(app, '/mcp', INITIALIZE, { host: 'alt.example.com:9999' })).status).toBe(
+      421,
+    );
   });
 
   test('loopback Host values are always accepted (local clients, container health checks)', async () => {
@@ -307,11 +368,18 @@ describe('HTTP MCP server: Host and Origin validation', () => {
   });
 
   test('requests without an Origin header are served; browser origins must be allowed', async () => {
-    const app = build(config({ AULA_MCP_ALLOWED_ORIGINS: 'https://assistant.example.com' }), fixture());
+    const app = build(
+      config({ AULA_MCP_ALLOWED_ORIGINS: 'https://assistant.example.com' }),
+      fixture(),
+    );
     expect((await post(app, '/mcp', INITIALIZE)).status).toBe(200);
-    expect((await post(app, '/mcp', INITIALIZE, { origin: 'https://assistant.example.com' })).status).toBe(200);
+    expect(
+      (await post(app, '/mcp', INITIALIZE, { origin: 'https://assistant.example.com' })).status,
+    ).toBe(200);
     // Same-origin pages served from the public host are fine too.
-    expect((await post(app, '/mcp', INITIALIZE, { origin: `https://${PUBLIC_HOST}` })).status).toBe(200);
+    expect((await post(app, '/mcp', INITIALIZE, { origin: `https://${PUBLIC_HOST}` })).status).toBe(
+      200,
+    );
     for (const origin of ['https://evil.example', 'null', 'http://localhost:3000', 'garbage']) {
       const res = await post(app, '/mcp', INITIALIZE, { origin });
       expect(res.status).toBe(403);
@@ -342,7 +410,9 @@ describe('HTTP MCP server: Host and Origin validation', () => {
     // Loopback is not implicitly trusted as an *origin* — only as a Host.
     expect(originAllowed('http://localhost:6274', cfg)).toBe(false);
     expect(originAllowed('http://127.0.0.1', cfg)).toBe(false);
-    expect(originAllowed('http://localhost:6274', { ...cfg, allowedOrigins: ['http://localhost:6274'] })).toBe(true);
+    expect(
+      originAllowed('http://localhost:6274', { ...cfg, allowedOrigins: ['http://localhost:6274'] }),
+    ).toBe(true);
     const d = digest(TOKEN);
     expect(checkBearer(`Bearer ${TOKEN}`, d)).toBe('ok');
     expect(checkBearer(`bearer   ${TOKEN}`, d)).toBe('ok');
@@ -386,12 +456,19 @@ describe('HTTP MCP server: health probes', () => {
 describe('HTTP MCP server: request limits', () => {
   test('a body over AULA_MCP_MAX_BODY_BYTES is 413 whether or not Content-Length admits it', async () => {
     const app = build(config({ AULA_MCP_MAX_BODY_BYTES: '1024' }), fixture());
-    const big = JSON.stringify({ ...INITIALIZE, params: { ...INITIALIZE.params, pad: 'x'.repeat(4096) } });
+    const big = JSON.stringify({
+      ...INITIALIZE,
+      params: { ...INITIALIZE.params, pad: 'x'.repeat(4096) },
+    });
     const res = await post(app, '/mcp', big);
     expect(res.status).toBe(413);
 
     // Chunked body with no Content-Length: the byte counter, not the header, decides.
-    const chunks = [new TextEncoder().encode('{"a":"'), new TextEncoder().encode('y'.repeat(2000)), new TextEncoder().encode('"}')];
+    const chunks = [
+      new TextEncoder().encode('{"a":"'),
+      new TextEncoder().encode('y'.repeat(2000)),
+      new TextEncoder().encode('"}'),
+    ];
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
         const next = chunks.shift();
@@ -403,11 +480,14 @@ describe('HTTP MCP server: request limits', () => {
       method: 'POST',
       headers: headers({}),
       body: stream,
-      // @ts-expect-error duplex is required for streaming bodies by the fetch spec
       duplex: 'half',
     });
     expect(await readBoundedRequest(streamed, 1024)).toBeNull();
-    const small = new Request(`https://${PUBLIC_HOST}/mcp`, { method: 'POST', headers: headers({}), body: '{"ok":1}' });
+    const small = new Request(`https://${PUBLIC_HOST}/mcp`, {
+      method: 'POST',
+      headers: headers({}),
+      body: '{"ok":1}',
+    });
     const bounded = await readBoundedRequest(small, 1024);
     expect(await bounded?.text()).toBe('{"ok":1}');
   });
@@ -436,7 +516,12 @@ describe('HTTP MCP server: request limits', () => {
     );
     // Give the first request a tick to enter the handler.
     await new Promise((r) => setTimeout(r, 20));
-    const rejected = await post(app, '/mcp', { jsonrpc: '2.0', id: 8, method: 'tools/list' }, { sessionId });
+    const rejected = await post(
+      app,
+      '/mcp',
+      { jsonrpc: '2.0', id: 8, method: 'tools/list' },
+      { sessionId },
+    );
     expect(rejected.status).toBe(503);
     expect(await rejected.json()).toEqual({ error: 'too_many_concurrent_requests' });
     fx.release();
@@ -465,7 +550,12 @@ describe('HTTP MCP server: session lifecycle disposes the AulaContext', () => {
     expect(fx.disposed).toEqual(['ctx-1']);
     expect(app.stats().httpSessions).toBe(0);
     // The old id is gone for good.
-    const gone = await post(app, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, { sessionId });
+    const gone = await post(
+      app,
+      '/mcp',
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { sessionId },
+    );
     expect(gone.status).toBe(404);
   });
 
@@ -509,7 +599,11 @@ describe('HTTP MCP server: session lifecycle disposes the AulaContext', () => {
     const controller = new AbortController();
     const res = await app.fetch(
       new Request(`https://${PUBLIC_HOST}/sse`, {
-        headers: { host: PUBLIC_HOST, authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' },
+        headers: {
+          host: PUBLIC_HOST,
+          authorization: `Bearer ${TOKEN}`,
+          accept: 'text/event-stream',
+        },
         signal: controller.signal,
       }),
     );

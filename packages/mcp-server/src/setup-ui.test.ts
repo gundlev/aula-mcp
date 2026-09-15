@@ -14,15 +14,15 @@ import { createHash } from 'node:crypto';
 import type { Logger, StoredTokenRecord, TokenStore } from '@aula-mcp/aula-auth';
 import {
   authorise,
-  createSetupApp,
   CSRF_HEADER,
   CSRF_HEADER_VALUE,
+  createSetupApp,
   DEFAULT_HA_INGRESS_PROXY,
-  loadSetupAuth,
   type LoginRunner,
+  loadSetupAuth,
   normaliseAddress,
-  SetupConfigError,
   type SetupApp,
+  SetupConfigError,
 } from './setup-ui.ts';
 
 class MemoryStore implements TokenStore {
@@ -73,9 +73,15 @@ afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
 });
 
-function get(a: SetupApp, path: string, init: RequestInit & { peer?: string } = {}): Promise<Response> {
+function get(
+  a: SetupApp,
+  path: string,
+  init: RequestInit & { peer?: string } = {},
+): Promise<Response> {
   const { peer, ...rest } = init;
-  return Promise.resolve(a.fetch(new Request(`http://test${path}`, rest), { remoteAddress: peer ?? null }));
+  return Promise.resolve(
+    a.fetch(new Request(`http://test${path}`, rest), { remoteAddress: peer ?? null }),
+  );
 }
 
 function post(
@@ -121,7 +127,10 @@ describe('loadSetupAuth — fail closed', () => {
   test('password requires a long enough secret', () => {
     expect(() => loadSetupAuth({ AULA_MCP_SETUP_AUTH: 'password' }, '0.0.0.0')).toThrow(/PASSWORD/);
     expect(() =>
-      loadSetupAuth({ AULA_MCP_SETUP_AUTH: 'password', AULA_MCP_SETUP_PASSWORD: 'short' }, '0.0.0.0'),
+      loadSetupAuth(
+        { AULA_MCP_SETUP_AUTH: 'password', AULA_MCP_SETUP_PASSWORD: 'short' },
+        '0.0.0.0',
+      ),
     ).toThrow(/at least/);
     const cfg = loadSetupAuth(
       { AULA_MCP_SETUP_AUTH: 'password', AULA_MCP_SETUP_PASSWORD: PASSWORD },
@@ -138,18 +147,24 @@ describe('loadSetupAuth — fail closed', () => {
   });
 
   test('unknown modes are rejected', () => {
-    expect(() => loadSetupAuth({ AULA_MCP_SETUP_AUTH: 'bearer' }, '127.0.0.1')).toThrow(/not understood/);
+    expect(() => loadSetupAuth({ AULA_MCP_SETUP_AUTH: 'bearer' }, '127.0.0.1')).toThrow(
+      /not understood/,
+    );
   });
 });
 
 describe('authorise', () => {
   test('ingress trusts only the TCP peer, never a forwarded header', () => {
     const auth = { mode: 'ingress' as const, trustedProxies: [DEFAULT_HA_INGRESS_PROXY] };
-    const req = new Request('http://test/status', { headers: { 'x-forwarded-for': DEFAULT_HA_INGRESS_PROXY } });
+    const req = new Request('http://test/status', {
+      headers: { 'x-forwarded-for': DEFAULT_HA_INGRESS_PROXY },
+    });
     expect(authorise(auth, req, {})).toBe('untrusted_peer');
     expect(authorise(auth, req, { remoteAddress: '10.0.0.9' })).toBe('untrusted_peer');
     expect(authorise(auth, req, { remoteAddress: DEFAULT_HA_INGRESS_PROXY })).toBe('ok');
-    expect(authorise(auth, req, { remoteAddress: `::ffff:${DEFAULT_HA_INGRESS_PROXY}` })).toBe('ok');
+    expect(authorise(auth, req, { remoteAddress: `::ffff:${DEFAULT_HA_INGRESS_PROXY}` })).toBe(
+      'ok',
+    );
     expect(normaliseAddress(`::ffff:${DEFAULT_HA_INGRESS_PROXY}`)).toBe(DEFAULT_HA_INGRESS_PROXY);
   });
 
@@ -158,11 +173,15 @@ describe('authorise', () => {
     const req = (header?: string) =>
       new Request('http://test/status', header ? { headers: { authorization: header } } : {});
     expect(authorise(auth, req(), {})).toBe('password_required');
-    expect(authorise(auth, req(`Basic ${Buffer.from(`admin:${PASSWORD}`).toString('base64')}`), {})).toBe('ok');
-    expect(authorise(auth, req(`Basic ${Buffer.from(`x:${PASSWORD}`).toString('base64')}`), {})).toBe('ok');
-    expect(authorise(auth, req(`Basic ${Buffer.from('x:wrong-password-xx').toString('base64')}`), {})).toBe(
-      'password_invalid',
-    );
+    expect(
+      authorise(auth, req(`Basic ${Buffer.from(`admin:${PASSWORD}`).toString('base64')}`), {}),
+    ).toBe('ok');
+    expect(
+      authorise(auth, req(`Basic ${Buffer.from(`x:${PASSWORD}`).toString('base64')}`), {}),
+    ).toBe('ok');
+    expect(
+      authorise(auth, req(`Basic ${Buffer.from('x:wrong-password-xx').toString('base64')}`), {}),
+    ).toBe('password_invalid');
     expect(authorise(auth, req(`Bearer ${PASSWORD}`), {})).toBe('password_required');
   });
 });
@@ -171,7 +190,10 @@ describe('setup UI: ingress and password gates', () => {
   test('ingress mode hides every route from a LAN peer, including /status and /logout', async () => {
     const store = new MemoryStore();
     await store.save(SAMPLE_RECORD);
-    const ui = app({ store, auth: { mode: 'ingress', trustedProxies: [DEFAULT_HA_INGRESS_PROXY] } });
+    const ui = app({
+      store,
+      auth: { mode: 'ingress', trustedProxies: [DEFAULT_HA_INGRESS_PROXY] },
+    });
 
     for (const [method, path] of [
       ['GET', '/'],
@@ -290,18 +312,27 @@ describe('setup UI: routes and input', () => {
     const ui = app();
     expect((await get(ui, '/login/events')).status).toBe(400);
     expect((await get(ui, '/login/events?sessionId=not-a-uuid')).status).toBe(400);
-    expect((await get(ui, '/login/events?sessionId=00000000-0000-0000-0000-000000000000')).status).toBe(404);
+    expect(
+      (await get(ui, '/login/events?sessionId=00000000-0000-0000-0000-000000000000')).status,
+    ).toBe(404);
     expect((await post(ui, '/login/identity', { index: 1 })).status).toBe(400);
-    expect((await post(ui, '/login/identity?sessionId=00000000-0000-0000-0000-000000000000', { index: 1 })).status).toBe(
-      404,
-    );
+    expect(
+      (
+        await post(ui, '/login/identity?sessionId=00000000-0000-0000-0000-000000000000', {
+          index: 1,
+        })
+      ).status,
+    ).toBe(404);
   });
 });
 
 describe('setup UI: session cleanup without an event stream', () => {
   test('a finished login is dropped after the retention window even if nobody subscribed', async () => {
     const runner: LoginRunner = async (session) => {
-      session.terminal = { event: 'success', data: JSON.stringify({ identityName: null, expiresInSec: 1 }) };
+      session.terminal = {
+        event: 'success',
+        data: JSON.stringify({ identityName: null, expiresInSec: 1 }),
+      };
       session.signalDone();
     };
     const ui = app({ runLogin: runner, limits: { sessionRetentionMs: 30 } });
@@ -333,7 +364,9 @@ describe('setup UI: session cleanup without an event stream', () => {
       logger,
       auth: { mode: 'password', passwordDigest: PASSWORD_DIGEST },
     });
-    await get(ui, '/status', { headers: { authorization: `Basic ${Buffer.from(`u:${PASSWORD}`).toString('base64')}` } });
+    await get(ui, '/status', {
+      headers: { authorization: `Basic ${Buffer.from(`u:${PASSWORD}`).toString('base64')}` },
+    });
     await get(ui, '/status');
     const joined = lines.join('\n');
     expect(joined).not.toContain(PASSWORD);

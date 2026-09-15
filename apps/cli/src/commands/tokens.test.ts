@@ -170,11 +170,10 @@ describe('tokens export → import round-trip', () => {
     await Bun.write(join(missing, 'tokens.json'), await readFile(join(bundleDir, 'tokens.json')));
     const prev = process.exit;
     const exits: number[] = [];
-    // @ts-expect-error test stub
-    process.exit = (code?: number) => {
+    process.exit = ((code?: number) => {
       exits.push(code ?? 0);
       throw new Error(`exit ${code}`);
-    };
+    }) as typeof process.exit;
     try {
       await expect(runTokensImport({ inDir: missing })).rejects.toThrow(/exit/);
       expect(exits).toEqual([1]);

@@ -42,9 +42,9 @@ describe('loadServerConfig — fail closed', () => {
   });
 
   test('a non-loopback bind without AULA_MCP_ALLOW_REMOTE refuses', () => {
-    expect(() => loadServerConfig({ AULA_MCP_HOST: '0.0.0.0', AULA_MCP_AUTH_TOKEN: TOKEN })).toThrow(
-      /Refusing to bind/,
-    );
+    expect(() =>
+      loadServerConfig({ AULA_MCP_HOST: '0.0.0.0', AULA_MCP_AUTH_TOKEN: TOKEN }),
+    ).toThrow(/Refusing to bind/);
   });
 
   test('AULA_MCP_ALLOW_REMOTE=1 is not authentication: still needs a token', () => {
@@ -67,7 +67,9 @@ describe('loadServerConfig — fail closed', () => {
     expect(() => loadServerConfig(remote({ AULA_MCP_ALLOWED_HOSTS: '' }))).toThrow(
       /AULA_MCP_ALLOWED_HOSTS is required/,
     );
-    expect(() => loadServerConfig(remote({ AULA_MCP_ALLOWED_HOSTS: '*' }))).toThrow(/"\*" is not accepted/);
+    expect(() => loadServerConfig(remote({ AULA_MCP_ALLOWED_HOSTS: '*' }))).toThrow(
+      /"\*" is not accepted/,
+    );
   });
 
   test('short or whitespace-bearing tokens are rejected', () => {
@@ -95,10 +97,14 @@ describe('loadServerConfig — fail closed', () => {
     const dir = await mkdtemp(join(tmpdir(), 'aula-cfg-'));
     const file = join(dir, 'token');
     await writeFile(file, `${TOKEN}\n`, { mode: 0o600 });
-    const cfg = loadServerConfig(remote({ AULA_MCP_AUTH_TOKEN: '', AULA_MCP_AUTH_TOKEN_FILE: file }));
+    const cfg = loadServerConfig(
+      remote({ AULA_MCP_AUTH_TOKEN: '', AULA_MCP_AUTH_TOKEN_FILE: file }),
+    );
     expect(cfg.auth.mode).toBe('bearer');
     expect(() =>
-      loadServerConfig(remote({ AULA_MCP_AUTH_TOKEN: '', AULA_MCP_AUTH_TOKEN_FILE: join(dir, 'missing') })),
+      loadServerConfig(
+        remote({ AULA_MCP_AUTH_TOKEN: '', AULA_MCP_AUTH_TOKEN_FILE: join(dir, 'missing') }),
+      ),
     ).toThrow(/could not be read/);
   });
 
@@ -133,7 +139,9 @@ describe('loadServerConfig — fail closed', () => {
   test('the setup UI, when enabled, stays on loopback unless told otherwise', () => {
     const cfg = loadServerConfig(remote({ AULA_MCP_INGRESS_PORT: '8099' }));
     expect(cfg.setupUi).toEqual({ port: 8099, host: '127.0.0.1' });
-    const ha = loadServerConfig(remote({ AULA_MCP_INGRESS_PORT: '8099', AULA_MCP_INGRESS_HOST: '0.0.0.0' }));
+    const ha = loadServerConfig(
+      remote({ AULA_MCP_INGRESS_PORT: '8099', AULA_MCP_INGRESS_HOST: '0.0.0.0' }),
+    );
     expect(ha.setupUi).toEqual({ port: 8099, host: '0.0.0.0' });
   });
 

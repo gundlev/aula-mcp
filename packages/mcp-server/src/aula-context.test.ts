@@ -118,7 +118,15 @@ describe('AulaContext token refresh', () => {
     expect(fake.calls).toEqual(['SYNTH-RT-0']);
 
     // … then expire the tokens again behind its back and hit it in parallel.
-    await store().save(record(tokens({ access_token: 'SYNTH-AT-1', refresh_token: 'SYNTH-RT-1', expires_at: nowSec() + 5 })));
+    await store().save(
+      record(
+        tokens({
+          access_token: 'SYNTH-AT-1',
+          refresh_token: 'SYNTH-RT-1',
+          expires_at: nowSec() + 5,
+        }),
+      ),
+    );
     const clients = await Promise.all([ctx.getClient(), ctx.getClient(), ctx.getClient()]);
 
     expect(fake.calls).toEqual(['SYNTH-RT-0', 'SYNTH-RT-1']);
@@ -158,7 +166,9 @@ describe('AulaContext token refresh', () => {
 
     // `aula login` on the CLI writes new tokens; with recheckIntervalMs 0 the
     // refresher notices on the next call without needing the file watcher.
-    await store().save(record(tokens({ access_token: 'SYNTH-AT-NEW', refresh_token: 'SYNTH-RT-NEW' })));
+    await store().save(
+      record(tokens({ access_token: 'SYNTH-AT-NEW', refresh_token: 'SYNTH-RT-NEW' })),
+    );
     const client2 = await ctx.getClient();
     const widgets2 = await ctx.getWidgetManager();
 

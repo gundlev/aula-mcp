@@ -134,7 +134,7 @@ export interface LoginSession {
   sessionId: string;
   username: string;
   startedAt: number;
-  stream?: SSEStreamingApi;
+  stream: SSEStreamingApi | undefined;
   /** Resolver waiting on user identity choice; null when no pending pick. */
   pendingIdentity: ((index: number) => void) | null;
   /** Queue of events that arrived before the stream was attached. */
@@ -147,7 +147,11 @@ export interface LoginSession {
   signalDone: () => void;
 }
 
-export type LoginRunner = (session: LoginSession, store: TokenStore, logger: Logger) => Promise<void>;
+export type LoginRunner = (
+  session: LoginSession,
+  store: TokenStore,
+  logger: Logger,
+) => Promise<void>;
 
 const ICON_SVG = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 3 1 9l11 6 9-4.91V17h2V9z"/></svg>`;
 
@@ -171,7 +175,9 @@ export function loadSetupAuth(env: NodeJS.ProcessEnv, bindHost: string): SetupAu
         .map((s) => normaliseAddress(s.trim()))
         .filter(Boolean);
       if (proxies.length === 0) {
-        throw new SetupConfigError('AULA_MCP_SETUP_TRUSTED_PROXIES must list at least one address.');
+        throw new SetupConfigError(
+          'AULA_MCP_SETUP_TRUSTED_PROXIES must list at least one address.',
+        );
       }
       return { mode: 'ingress', trustedProxies: proxies };
     }
@@ -357,9 +363,13 @@ export function createSetupApp(options: SetupAppOptions = {}): SetupApp {
 
     // Rate limit: a MitID login is a human-paced action; a burst is abuse.
     const t = now();
-    while (loginStarts.length > 0 && t - (loginStarts[0] as number) > limits.loginWindowMs) loginStarts.shift();
+    while (loginStarts.length > 0 && t - (loginStarts[0] as number) > limits.loginWindowMs)
+      loginStarts.shift();
     if (loginStarts.length >= limits.loginStartsPerWindow) {
-      c.header('retry-after', String(Math.ceil((limits.loginWindowMs - (t - (loginStarts[0] as number))) / 1000)));
+      c.header(
+        'retry-after',
+        String(Math.ceil((limits.loginWindowMs - (t - (loginStarts[0] as number))) / 1000)),
+      );
       return c.json({ error: 'too many login attempts; try again later' }, 429);
     }
     if (activeLogins() >= limits.maxConcurrentLogins) {
@@ -379,6 +389,7 @@ export function createSetupApp(options: SetupAppOptions = {}): SetupApp {
       pendingIdentity: null,
       bufferedEvents: [],
       abort: new AbortController(),
+      stream: undefined,
       done,
       signalDone,
     };

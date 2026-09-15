@@ -166,7 +166,10 @@ export function createHttpApp(deps: HttpAppDeps): HttpApp {
     }
   }
 
-  const sweepInterval = Math.max(1_000, Math.floor(Math.min(config.httpIdleMs, config.sseIdleMs) / 4));
+  const sweepInterval = Math.max(
+    1_000,
+    Math.floor(Math.min(config.httpIdleMs, config.sseIdleMs) / 4),
+  );
   const sweeper = setInterval(() => sweep(), sweepInterval);
   sweeper.unref?.();
 
@@ -330,7 +333,8 @@ export function createHttpApp(deps: HttpAppDeps): HttpApp {
     inFlight++;
     try {
       const bounded = await readBoundedRequest(c.req.raw, config.maxBodyBytes);
-      if (!bounded) return c.json({ error: 'payload_too_large', maxBytes: config.maxBodyBytes }, 413);
+      if (!bounded)
+        return c.json({ error: 'payload_too_large', maxBytes: config.maxBodyBytes }, 413);
       return await handler(bounded);
     } finally {
       inFlight--;
@@ -395,7 +399,8 @@ export function createHttpApp(deps: HttpAppDeps): HttpApp {
     app.post('/messages', (c) =>
       boundedPost(c, async (request) => {
         const sessionId = new URL(request.url).searchParams.get('sessionId');
-        if (!sessionId) return Response.json({ error: 'missing sessionId query parameter' }, { status: 400 });
+        if (!sessionId)
+          return Response.json({ error: 'missing sessionId query parameter' }, { status: 400 });
         const session = sseSessions.get(sessionId);
         if (!session) return Response.json({ error: 'unknown sessionId' }, { status: 404 });
         let body: unknown;
@@ -456,7 +461,10 @@ export function splitHostHeader(value: string): { host: string; port: string | n
 }
 
 /** Loopback is always accepted; otherwise the header must match an entry. */
-export function hostHeaderAllowed(value: string, config: Pick<ServerConfig, 'allowedHosts'>): boolean {
+export function hostHeaderAllowed(
+  value: string,
+  config: Pick<ServerConfig, 'allowedHosts'>,
+): boolean {
   const parsed = splitHostHeader(value);
   if (!parsed) return false;
   if (isLoopbackHost(parsed.host)) return true;
