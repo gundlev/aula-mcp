@@ -57,8 +57,10 @@ In the add-on's Configuration tab:
 | Option | Default | Notes |
 | --- | --- | --- |
 | `aula_mcp_key` | `""` | Encryption key for the token store. Leave empty unless you set one when exporting tokens. |
+| `mcp_auth_token` | `""` | Bearer token MCP clients must send (`openssl rand -hex 32`). Required when `allow_remote` is true. |
+| `allowed_hosts` | `homeassistant.local,homeassistant` | Host header values accepted on the MCP port. |
 | `log` | `false` | Verbose logs (auth flow, HTTP calls). Useful when something's stuck. |
-| `allow_remote` | `true` | Bind to `0.0.0.0` so HA + other LAN devices can reach the server. Disable only if you front the addon with Ingress / reverse proxy. |
+| `allow_remote` | `true` | Bind to `0.0.0.0` so HA + other LAN devices can reach the server. This is not authentication. |
 
 Start the add-on. Check the log — should see `aula-mcp listening on http://0.0.0.0:7878/mcp`.
 
@@ -86,13 +88,18 @@ the add-on to rebuild against the latest commit.
 
 ## Limitations
 
-- **No OAuth on the MCP endpoint yet.** The server is single-user — anyone
-  with LAN access to `:7878` can drive your Aula tokens. Inside a household
-  on a trusted LAN this is generally fine; if your network has untrusted
-  peers, set `allow_remote: false` and front the add-on with HA Ingress.
-- **MitID re-login still happens on a workstation.** When your Aula refresh
-  token expires (Aula rotates aggressively), re-run `pnpm aula login` + `pnpm
-  aula tokens export` and recopy the bundle. There's no headless re-login flow.
+- **MCP clients must send `Authorization: Bearer <mcp_auth_token>`.** Set
+  `mcp_auth_token` (at least 32 characters) in the add-on options before
+  start when `allow_remote` is true. `allow_remote` only opens the bind;
+  it is not authentication. Point HA's MCP client at `/sse` **and**
+  configure the same bearer token.
+- **The setup UI is only reachable through HA Ingress.** LAN peers talking
+  to port 8099 directly get 403. Logout and login-start require a CSRF
+  header the page itself sends.
+- **MitID re-login can still be done on a workstation.** When your Aula
+  refresh token expires, either use the Ingress UI or `pnpm aula login` +
+  `pnpm aula tokens export` and recopy the bundle. There's no headless
+  re-login flow and no STIL bypass.
 - **One arch image per build.** Pre-built multi-arch images aren't published;
   Supervisor builds the image locally on install. First start can take a
   minute or two on a Raspberry Pi.

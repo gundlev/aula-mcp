@@ -33,9 +33,13 @@ panel_icon: mdi:school
 panel_title: aula-mcp
 options:
   aula_mcp_key: ""
+  mcp_auth_token: ""
+  allowed_hosts: "homeassistant.local,homeassistant"
   log: false
   allow_remote: true
 schema:
   aula_mcp_key: "password?"
+  mcp_auth_token: "password?"
+  allowed_hosts: "str?"
   log: bool
   allow_remote: bool

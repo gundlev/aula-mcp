@@ -140,7 +140,9 @@ sender de værktøjer aula-mcp eksponerer videre til den konversationsagent
 3. **SSE Server URL:** `http://homeassistant.local:7878/sse`
    - Hvis din HA ikke svarer på `homeassistant.local` (statisk IP, anden
      hostname): brug HA's IP-adresse, fx `http://192.168.1.50:7878/sse`.
-4. **Submit**. HA opdager `aula.*`-værktøjerne automatisk.
+4. **Authorization:** samme værdi som add-on-optionen `mcp_auth_token`,
+   sendt som `Authorization: Bearer <token>`. Uden den svarer `/sse` 401.
+5. **Submit**. HA opdager `aula.*`-værktøjerne automatisk.
 
 Tjek at det virker: Settings → Devices & Services → klik på **Model Context
 Protocol** integrationen. Du burde se en liste med værktøjer som
@@ -148,8 +150,8 @@ Protocol** integrationen. Du burde se en liste med værktøjer som
 `aula.messages.list`, osv.
 
 > 📝 Hvis HA's MCP-klient integration **ikke kan oprette forbindelse**, tjek
-> at add-on'en kører og at `allow_remote: true` er sat i dens config
-> (default). Se [Fejlfinding](#fejlfinding) nedenfor.
+> at add-on'en kører, at `allow_remote: true` er sat, og at MCP-klienten
+> sender det samme `mcp_auth_token` som add-on'en. Se [Fejlfinding](#fejlfinding).
 
 ---
 
