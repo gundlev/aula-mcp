@@ -16,7 +16,13 @@
 
 import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { EncryptedFileTokenStore } from '@aula-mcp/aula-auth';
+import {
+  decodeKeyMaterial,
+  EncryptedFileTokenStore,
+  generateKeyMaterial,
+  readKeyFile,
+  writeKeyFile,
+} from '@aula-mcp/aula-auth';
 import { fail, fmt, ok, warn } from '../io.ts';
 import { defaultStore } from '../store.ts';
 
@@ -43,30 +49,44 @@ export async function runTokensExport(args: TokensExportArgs): Promise<void> {
   const keyFile = join(outDir, '.key');
   await mkdir(outDir, { recursive: true });
 
-  // Always export with a freshly-generated key — never reuse the local
-  // file backend's .key, which might be in use elsewhere.
+  // Independent key material for the bundle. Passing it explicitly (and
+  // ignoring AULA_MCP_KEY) is what keeps a workstation env key from
+  // encrypting the export — the audit reproduced a "success" that never
+  // wrote `.key` because resolveKey() short-circuited on the env var.
+  const material = generateKeyMaterial();
+  await writeKeyFile(keyFile, material);
   const exportStore = new EncryptedFileTokenStore({
     filePath: tokensFile,
     keyFilePath: keyFile,
+    key: decodeKeyMaterial(material),
+    ignoreEnv: true,
   });
   await exportStore.save(record);
 
   ok(`Exported tokens to ${fmt.dim(outDir)}`);
   warn('Both files contain live credentials — treat them like a password.');
+  warn(`After the transfer, delete ${fmt.dim(outDir)} on this machine.`);
   process.stdout.write(
     `\n${fmt.bold('Move to a server:')}\n  scp ${outDir}/tokens.json ${outDir}/.key user@server:/var/lib/aula-mcp/\n` +
-      `\n${fmt.bold('Or import on another machine:')}\n  aula tokens import ${outDir}\n`,
+      `\n${fmt.bold('Or import on another machine:')}\n  aula tokens import ${outDir}\n` +
+      `\nThe server decrypts the bundle with ${fmt.dim('.key')} and re-encrypts with its own key\n` +
+      `(AULA_MCP_KEY or its own .key). Do not copy the workstation AULA_MCP_KEY.\n`,
   );
 }
 
 export async function runTokensImport(args: TokensImportArgs): Promise<void> {
   const inDir = resolve(args.inDir);
-  const sourceStore = new EncryptedFileTokenStore({
-    filePath: join(inDir, 'tokens.json'),
-    keyFilePath: join(inDir, '.key'),
-  });
-  let record: Awaited<ReturnType<typeof sourceStore.load>>;
+  // Decrypt with the bundle's own `.key`. Never inherit AULA_MCP_KEY — that
+  // is the destination store's key and decrypts a foreign envelope as garbage.
+  let record: Awaited<ReturnType<EncryptedFileTokenStore['load']>>;
   try {
+    const bundleKey = await readKeyFile(join(inDir, '.key'));
+    const sourceStore = new EncryptedFileTokenStore({
+      filePath: join(inDir, 'tokens.json'),
+      keyFilePath: join(inDir, '.key'),
+      key: bundleKey,
+      ignoreEnv: true,
+    });
     record = await sourceStore.load();
   } catch (e) {
     fail(`Failed to read token bundle from ${inDir}: ${(e as Error).message}`);

@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EncryptedFileTokenStore, type StoredTokenRecord } from '@aula-mcp/aula-auth';
@@ -49,6 +49,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  delete process.env.AULA_MCP_KEY;
   await rm(workDir, { recursive: true, force: true });
 });
 
@@ -99,5 +100,92 @@ describe('tokens export → import round-trip', () => {
     // original install, and so a leaked bundle can't be used to decrypt
     // anything else encrypted with the local key.
     expect(bundleKey).not.toBe(localKey);
+  });
+
+  test('export writes .key even when AULA_MCP_KEY is set, and does not use that key', async () => {
+    process.env.AULA_MCP_KEY = 'aa'.repeat(32);
+    const localStore = new EncryptedFileTokenStore({
+      filePath: join(workDir, 'local', 'tokens.json'),
+      keyFilePath: join(workDir, 'local', '.key'),
+    });
+    await localStore.save(FAKE_RECORD);
+
+    const bundleDir = join(workDir, 'bundle');
+    await runTokensExport({ outDir: bundleDir });
+    const bundleKey = (await readFile(join(bundleDir, '.key'), 'utf8')).trim();
+    expect(bundleKey).toHaveLength(64);
+    expect(bundleKey).not.toBe(process.env.AULA_MCP_KEY);
+
+    // The bundle decrypts with its own key, not the env key.
+    const viaBundleKey = new EncryptedFileTokenStore({
+      filePath: join(bundleDir, 'tokens.json'),
+      keyFilePath: join(bundleDir, '.key'),
+      ignoreEnv: true,
+    });
+    expect(await viaBundleKey.load()).toEqual(FAKE_RECORD);
+    const viaEnv = new EncryptedFileTokenStore({
+      filePath: join(bundleDir, 'tokens.json'),
+      keyFilePath: join(bundleDir, 'missing.key'),
+    });
+    await expect(viaEnv.load()).rejects.toThrow();
+    delete process.env.AULA_MCP_KEY;
+  });
+
+  test('import decrypts with the bundle key and re-encrypts with the destination key', async () => {
+    process.env.AULA_MCP_KEY = 'bb'.repeat(32);
+    const sourceDir = join(workDir, 'src-store');
+    const source = new EncryptedFileTokenStore({
+      filePath: join(sourceDir, 'tokens.json'),
+      keyFilePath: join(sourceDir, '.key'),
+    });
+    await source.save(FAKE_RECORD);
+    process.env.AULA_MCP_DIR = sourceDir;
+    const bundleDir = join(workDir, 'bundle');
+    await runTokensExport({ outDir: bundleDir });
+
+    process.env.AULA_MCP_KEY = 'cc'.repeat(32);
+    process.env.AULA_MCP_DIR = join(workDir, 'dest');
+    await runTokensImport({ inDir: bundleDir });
+
+    const dest = new EncryptedFileTokenStore({
+      filePath: join(workDir, 'dest', 'tokens.json'),
+      keyFilePath: join(workDir, 'dest', '.key'),
+    });
+    expect(await dest.load()).toEqual(FAKE_RECORD);
+    delete process.env.AULA_MCP_KEY;
+  });
+
+  test('import fails closed when the bundle key is missing or wrong', async () => {
+    const localStore = new EncryptedFileTokenStore({
+      filePath: join(workDir, 'local', 'tokens.json'),
+      keyFilePath: join(workDir, 'local', '.key'),
+      ignoreEnv: true,
+    });
+    await localStore.save(FAKE_RECORD);
+    const bundleDir = join(workDir, 'bundle');
+    await runTokensExport({ outDir: bundleDir });
+
+    const missing = join(workDir, 'missing-key');
+    await mkdir(missing, { recursive: true });
+    await Bun.write(join(missing, 'tokens.json'), await readFile(join(bundleDir, 'tokens.json')));
+    const prev = process.exit;
+    const exits: number[] = [];
+    // @ts-expect-error test stub
+    process.exit = (code?: number) => {
+      exits.push(code ?? 0);
+      throw new Error(`exit ${code}`);
+    };
+    try {
+      await expect(runTokensImport({ inDir: missing })).rejects.toThrow(/exit/);
+      expect(exits).toEqual([1]);
+
+      await Bun.write(join(bundleDir, '.key'), 'dd'.repeat(32));
+      exits.length = 0;
+      process.env.AULA_MCP_DIR = join(workDir, 'dest2');
+      await expect(runTokensImport({ inDir: bundleDir })).rejects.toThrow(/exit/);
+      expect(exits).toEqual([1]);
+    } finally {
+      process.exit = prev;
+    }
   });
 });

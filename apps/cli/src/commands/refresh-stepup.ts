@@ -49,7 +49,7 @@ export async function runRefreshStepup(args: RefreshStepupCommandArgs = {}): Pro
     }
     fail(`No persisted cookies at ${fmt.dim(cookiesFile())}.`);
     info(
-      `Cookies are written on every ${fmt.bold('aula login')}. If you logged in before this feature shipped, log in once more — then ${fmt.bold('aula refresh-stepup')} will be available.`,
+      `Cookie persistence is opt-in. Re-run ${fmt.bold('AULA_MCP_PERSIST_COOKIES=1 aula login')}, then ${fmt.bold('aula refresh-stepup')} will be available on this workstation. Do not copy cookies.json to a remote server.`,
     );
     process.exit(1);
   }

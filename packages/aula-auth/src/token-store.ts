@@ -95,6 +95,9 @@ export interface EncryptedFileTokenStoreOptions {
   key?: Buffer;
   /** Override env var lookup. */
   envVarName?: string;
+  /** Skip `process.env[envVarName]` entirely. Export/import bundles use this
+   *  so a workstation's `AULA_MCP_KEY` cannot encrypt or decrypt the bundle. */
+  ignoreEnv?: boolean;
   logger?: Logger;
 }
 
@@ -122,6 +125,7 @@ export class EncryptedFileTokenStore implements TokenStore {
   readonly filePath: string;
   private readonly keyFilePath: string;
   private readonly envVar: string;
+  private readonly ignoreEnv: boolean;
   private readonly explicitKey?: Buffer;
   private readonly logger: Logger;
   private cachedKey?: Buffer;
@@ -130,6 +134,7 @@ export class EncryptedFileTokenStore implements TokenStore {
     this.filePath = opts.filePath ?? DEFAULT_FILE;
     this.keyFilePath = opts.keyFilePath ?? DEFAULT_KEY_FILE;
     this.envVar = opts.envVarName ?? DEFAULT_ENV;
+    this.ignoreEnv = opts.ignoreEnv === true;
     if (opts.key) this.explicitKey = opts.key;
     this.logger = opts.logger ?? silentLogger;
   }
@@ -225,7 +230,7 @@ export class EncryptedFileTokenStore implements TokenStore {
       this.cachedKey = this.explicitKey;
       return this.cachedKey;
     }
-    const envValue = process.env[this.envVar];
+    const envValue = this.ignoreEnv ? undefined : process.env[this.envVar];
     if (envValue) {
       const buf = decodeKeyMaterial(envValue);
       this.cachedKey = buf;

@@ -123,29 +123,33 @@ export async function runLogin(args: LoginCommandArgs): Promise<void> {
     };
     await defaultStore().save(record);
 
-    // Persist the cookie jar so `aula refresh-stepup` can attempt silent
-    // SSO against the broker (unilogin) without dragging the user through
-    // MitID every time the assurance level drops.
-    try {
-      await mkdir(aulaMcpDir(), { recursive: true });
-      const serialized = await http.jar.serialize();
-      await writeFile(cookiesFile(), serialized, { mode: 0o600 });
-      // When AULA_MCP_DIR is owned by a service account (e.g. openclaw
-      // on the gateway VM) but `aula login` is being run as root, a
-      // freshly-created cookies.json lands root-owned and the
-      // service-account-run refresh-stepup timer can't read it. Match
-      // the directory's ownership.
+    // Cookie persistence is opt-in. The jar holds broker/MitID session
+    // cookies; those are only needed for `aula refresh-stepup` on the
+    // same workstation. A Hetzner/Coolify install refreshes with the
+    // OAuth refresh token alone and must not receive this file.
+    if (process.env.AULA_MCP_PERSIST_COOKIES === '1') {
       try {
-        const dirStat = await stat(aulaMcpDir());
-        if (dirStat.uid !== process.getuid?.()) {
-          await chown(cookiesFile(), dirStat.uid, dirStat.gid);
+        await mkdir(aulaMcpDir(), { recursive: true });
+        const serialized = await http.jar.serialize();
+        await writeFile(cookiesFile(), serialized, { mode: 0o600 });
+        // When AULA_MCP_DIR is owned by a service account (e.g. openclaw
+        // on the gateway VM) but `aula login` is being run as root, a
+        // freshly-created cookies.json lands root-owned and the
+        // service-account-run refresh-stepup timer can't read it. Match
+        // the directory's ownership.
+        try {
+          const dirStat = await stat(aulaMcpDir());
+          if (dirStat.uid !== process.getuid?.()) {
+            await chown(cookiesFile(), dirStat.uid, dirStat.gid);
+          }
+        } catch {
+          // chown is best-effort — non-root can't, and that's fine when
+          // the running user already owns the dir.
         }
-      } catch {
-        // chown is best-effort — non-root can't, and that's fine when
-        // the running user already owns the dir.
+        info(`Cookie jar saved to ${fmt.dim(cookiesFile())} (AULA_MCP_PERSIST_COOKIES=1).`);
+      } catch (e) {
+        warn(`Could not persist cookies: ${(e as Error).message}`);
       }
-    } catch (e) {
-      warn(`Could not persist cookies: ${(e as Error).message}`);
     }
 
     ok(`Login successful. Tokens saved to ${fmt.dim(defaultStore().path)}`);

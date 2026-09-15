@@ -36,6 +36,7 @@ const HELP = `${fmt.bold('aula')} — MCP-friendly Aula client
 ${fmt.bold('Usage')}:
   aula login [--username <user>] [--method APP|CODE_TOKEN] [--debug]
              [--transcript <file>]
+             (set AULA_MCP_PERSIST_COOKIES=1 to also keep the MitID cookie jar)
   aula refresh-stepup [--json]
   aula status [--json]
   aula whoami [--json]
@@ -65,15 +66,19 @@ ${fmt.bold('Notes')}:
   • aula doctor walks every read endpoint and reports per-call status.
   • aula log shows recent login attempts (success/failure + timestamps).
   • aula refresh-stepup attempts a silent OIDC re-authorize using cookies
-    persisted by the last login. Succeeds without MitID prompt when the
-    broker session is still alive; falls back to "run aula login" when
-    not. Manual recovery tool — rarely needed since the plain
-    refresh_token grant preserves sensitive scope.
-  • aula tokens export <dir>  — write tokens.json + .key into <dir> for
-    transfer (always re-encrypts with a fresh AES-GCM key). Pair with
-    aula tokens import <dir> on the other machine, or scp the two files
-    into a server's AULA_MCP_DIR. Use to move from macOS Keychain to a
-    self-hosted Linux box.
+    persisted only when AULA_MCP_PERSIST_COOKIES=1 was set at login.
+    Succeeds without MitID prompt when the broker session is still alive;
+    falls back to "run aula login" when not. Workstation-only — do not
+    copy cookies.json to a remote server. Manual recovery tool; the plain
+    refresh_token grant already preserves sensitive scope.
+  • aula tokens export <dir>  — write tokens.json + an independent .key
+    into <dir> for transfer. The bundle never inherits AULA_MCP_KEY.
+    Pair with aula tokens import <dir> on the other machine (decrypts
+    with the bundle key, re-encrypts with the destination key), or scp
+    the two files into a server's AULA_MCP_DIR. Delete the bundle after
+    the transfer.
+  • aula logout clears the token store and any cookies.json. It cannot
+    revoke the refresh token at Aula.
 `;
 
 async function main(): Promise<void> {
